@@ -1,41 +1,40 @@
-### Health Check
-GET http://127.0.0.1:8000/api/health
-
-### Get all chat sessions
+### Get sessions - no auth (should return 401)
 GET http://127.0.0.1:8000/api/chat-sessions
 
-### Get chat sessions with pagination
+### Get sessions - with auth token
+GET http://127.0.0.1:8000/api/chat-sessions
+Authorization: Bearer any-token-works-for-now
+
+### Get sessions - with pagination
 GET http://127.0.0.1:8000/api/chat-sessions?limit=5&page=2
+Authorization: Bearer any-token-works-for-now
 
-### Get chat sessions with search
-GET http://127.0.0.1:8000/api/chat-sessions?search=recursion&limit=10
-
-### Get single chat session
-GET http://127.0.0.1:8000/api/chat-sessions/abc123
-
-### Get messages for a session
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-
-### Get messages with limit
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/messages?limit=5
-
-### Create new chat session
+### Create session - no auth (should return 401)
 POST http://127.0.0.1:8000/api/chat-sessions
 Content-Type: application/json
-Authorization: Bearer placeholder-token
 
-### Add message to session (body model coming in Lesson 3)
+{
+  "title": "Data Structures"
+}
+
+### Create session - with auth
+POST http://127.0.0.1:8000/api/chat-sessions
+Content-Type: application/json
+Authorization: Bearer any-token-works-for-now
+
+{
+  "title": "Data Structures Study Session"
+}
+
+### Send message - with auth
 POST http://127.0.0.1:8000/api/chat-sessions/abc123/messages
 Content-Type: application/json
+Authorization: Bearer any-token-works-for-now
 
-### Delete a chat session
+{
+  "content": "Explain recursion in simple English."
+}
+
+### Delete session - with auth
 DELETE http://127.0.0.1:8000/api/chat-sessions/abc123
-
-### Get session summary - brief (default)
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/summary
-
-### Get session summary - detailed
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/summary?format=detailed
-
-### Get session summary - invalid format (should return 422)
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/summary?format=nonsense
+Authorization: Bearer any-token-works-for-now
