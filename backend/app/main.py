@@ -1,16 +1,73 @@
-from fastapi import FastAPI
+from app.core.logging import setup_logging
 
-from app.api.health import router as health_router
+# Setup logging FIRST before anything else
+setup_logging()
+
+# Now import everything else
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
+from app.api.health import router as health_router
 from app.config import settings
+from app.core.exceptions import register_exception_handlers
+from app.core.middleware import RequestLoggingMiddleware
 
-app=FastAPI(
-            title=settings.APP_NAME,
-            description="This is the backend API for the AI Study Assistant.",
-            version=settings.APP_VERSION
-            )
+import logging
 
-app.include_router(health_router)
-app.include_router(chat_router)
-app.include_router(documents_router)
+logger = logging.getLogger(__name__)
+
+
+def create_application() -> FastAPI:
+    """
+    Creates and configures the FastAPI application.
+    """
+    application = FastAPI(
+        title=settings.APP_NAME,
+        description="Backend API for the AI Study Assistant platform.",
+        version=settings.APP_VERSION,
+        docs_url="/docs" if settings.DEBUG else None,
+        redoc_url="/redoc" if settings.DEBUG else None,
+    )
+
+    # ------------------------------------------------------------------
+    # MIDDLEWARE
+    # ------------------------------------------------------------------
+
+    application.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.ALLOWED_ORIGINS,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    application.add_middleware(RequestLoggingMiddleware)
+
+    # ------------------------------------------------------------------
+    # EXCEPTION HANDLERS
+    # ------------------------------------------------------------------
+
+    register_exception_handlers(application)
+
+    # ------------------------------------------------------------------
+    # ROUTERS
+    # ------------------------------------------------------------------
+
+    application.include_router(health_router)
+    application.include_router(chat_router)
+    application.include_router(documents_router)
+
+    logger.info(
+        "Application ready. name=%s version=%s debug=%s origins=%s",
+        settings.APP_NAME,
+        settings.APP_VERSION,
+        settings.DEBUG,
+        settings.ALLOWED_ORIGINS,
+    )
+
+    return application
+
+
+app = create_application()

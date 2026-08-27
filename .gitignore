@@ -7,8 +7,10 @@ __pycache__/
 # Virtual environment
 backend/venv/
 
-# Environment variables
+# Environment variables — NEVER commit these
 .env
+*.env
+!.env.example
 
 # VS Code
 .vscode/
@@ -16,3 +18,7 @@ backend/venv/
 # OS files
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log
+logs/
