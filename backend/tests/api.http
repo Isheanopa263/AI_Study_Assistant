@@ -1,240 +1,229 @@
 # ==============================================================================
-# AI STUDY ASSISTANT — API TEST FILE
+# AI STUDY ASSISTANT — MASTER INTEGRATION TEST SUITE
 # ==============================================================================
-# Use with VS Code REST Client extension
-# Click "Send Request" above each request to test
-# ==============================================================================
-
-
-# ==============================================================================
-# HEALTH ENDPOINTS
+# Use with the VS Code "REST Client" extension.
+# Ensure your FastAPI server is running: uvicorn app.main:app --reload
+#
+# Variables are defined below to avoid repeating hosts or tokens.
 # ==============================================================================
 
-### Health Check
-GET http://127.0.0.1:8000/api/health
-
-### Info Endpoint
-GET http://127.0.0.1:8000/api/info
+@host = http://127.0.0.1:8000
+@token = Bearer any-token-works-for-now
+@session_id = valid-session-123
 
 
 # ==============================================================================
-# ERROR HANDLING TESTS
+# 1. SYSTEM HEALTH & METADATA
 # ==============================================================================
 
-### Test unhandled exception (should return 500 with consistent format)
-GET http://127.0.0.1:8000/api/test-error
+### Health Check (Verify system is up)
+GET {{host}}/api/health
 
-### Test NotFoundException (should return 404 with consistent format)
-GET http://127.0.0.1:8000/api/test-not-found
-
-### Test non-existent endpoint (should return 404)
-GET http://127.0.0.1:8000/api/this-does-not-exist
+### API Information (Verify configuration settings)
+GET {{host}}/api/info
 
 
 # ==============================================================================
-# AUTHENTICATION TESTS
+# 2. GLOBAL EXCEPTION HANDLING & CORS
 # ==============================================================================
 
-### No auth token — should return 401
-GET http://127.0.0.1:8000/api/chat-sessions
+### Test Unhandled Exception (Should return safe 500 error, trace ID, hides stack)
+GET {{host}}/api/test-error
 
-### Invalid auth format — should return 401
-GET http://127.0.0.1:8000/api/chat-sessions
-Authorization: InvalidFormat token123
+### Test Custom NotFoundException (Should return consistent 404 shape)
+GET {{host}}/api/test-not-found
 
-### Empty bearer token — should return 401
-GET http://127.0.0.1:8000/api/chat-sessions
-Authorization: Bearer 
+### Test Route 404 (Verify FastAPI's fallback router overrides)
+GET {{host}}/api/this-does-not-exist
 
-### Valid auth token — should return 200
-GET http://127.0.0.1:8000/api/chat-sessions
-Authorization: Bearer any-token-works-for-now
-
-
-# ==============================================================================
-# CHAT SESSION ENDPOINTS
-# ==============================================================================
-
-### Get all chat sessions — with pagination defaults
-GET http://127.0.0.1:8000/api/chat-sessions
-Authorization: Bearer any-token-works-for-now
-
-### Get all chat sessions — with custom pagination
-GET http://127.0.0.1:8000/api/chat-sessions?limit=5&page=2
-Authorization: Bearer any-token-works-for-now
-
-### Get all chat sessions — with search
-GET http://127.0.0.1:8000/api/chat-sessions?search=recursion&limit=10
-Authorization: Bearer any-token-works-for-now
-
-### Get all chat sessions — invalid limit (should return 422)
-GET http://127.0.0.1:8000/api/chat-sessions?limit=500
-Authorization: Bearer any-token-works-for-now
-
-### Get all chat sessions — invalid page (should return 422)
-GET http://127.0.0.1:8000/api/chat-sessions?page=0
-Authorization: Bearer any-token-works-for-now
-
-### Get single chat session
-GET http://127.0.0.1:8000/api/chat-sessions/abc123
-Authorization: Bearer any-token-works-for-now
-
-
-# ==============================================================================
-# CHAT SESSION CREATION
-# ==============================================================================
-
-### Create session — with title
-POST http://127.0.0.1:8000/api/chat-sessions
-Content-Type: application/json
-Authorization: Bearer any-token-works-for-now
-
-{
-  "title": "Data Structures Study Session"
-}
-
-### Create session — without title (optional field)
-POST http://127.0.0.1:8000/api/chat-sessions
-Content-Type: application/json
-Authorization: Bearer any-token-works-for-now
-
-{}
-
-### Create session — no auth (should return 401)
-POST http://127.0.0.1:8000/api/chat-sessions
-Content-Type: application/json
-
-{
-  "title": "Data Structures Study Session"
-}
-
-
-# ==============================================================================
-# CHAT MESSAGES
-# ==============================================================================
-
-### Get messages for a session
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-Authorization: Bearer any-token-works-for-now
-
-### Get messages with custom limit
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/messages?limit=5
-Authorization: Bearer any-token-works-for-now
-
-### Send a valid message
-POST http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-Content-Type: application/json
-Authorization: Bearer any-token-works-for-now
-
-{
-  "content": "Explain recursion in simple English."
-}
-
-### Send a long message
-POST http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-Content-Type: application/json
-Authorization: Bearer any-token-works-for-now
-
-{
-  "content": "I need help understanding linked lists. Can you explain what a linked list is, how it differs from an array, when to use each one, and provide a simple Python implementation with comments explaining each line?"
-}
-
-### Send empty message — should return 422
-POST http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-Content-Type: application/json
-Authorization: Bearer any-token-works-for-now
-
-{
-  "content": ""
-}
-
-### Send message with no body — should return 422
-POST http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-Content-Type: application/json
-Authorization: Bearer any-token-works-for-now
-
-{}
-
-### Send message with no content field — should return 422
-POST http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-Content-Type: application/json
-Authorization: Bearer any-token-works-for-now
-
-{
-  "wrong_field": "this should fail"
-}
-
-### Send message — no auth (should return 401)
-POST http://127.0.0.1:8000/api/chat-sessions/abc123/messages
-Content-Type: application/json
-
-{
-  "content": "Explain recursion in simple English."
-}
-
-
-# ==============================================================================
-# DELETE SESSION
-# ==============================================================================
-
-### Delete a session — with auth
-DELETE http://127.0.0.1:8000/api/chat-sessions/abc123
-Authorization: Bearer any-token-works-for-now
-
-### Delete a session — no auth (should return 401)
-DELETE http://127.0.0.1:8000/api/chat-sessions/abc123
-
-
-# ==============================================================================
-# SESSION SUMMARY
-# ==============================================================================
-
-### Get summary — default format (brief)
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/summary
-Authorization: Bearer any-token-works-for-now
-
-### Get summary — detailed format
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/summary?format=detailed
-Authorization: Bearer any-token-works-for-now
-
-### Get summary — invalid format (should return 422)
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/summary?format=nonsense
-Authorization: Bearer any-token-works-for-now
-
-### Get summary — no auth (should return 401)
-GET http://127.0.0.1:8000/api/chat-sessions/abc123/summary
-
-
-# ==============================================================================
-# DOCUMENTS
-# ==============================================================================
-
-### List documents — with auth
-GET http://127.0.0.1:8000/api/documents
-Authorization: Bearer any-token-works-for-now
-
-### List documents — no auth (if protected later)
-GET http://127.0.0.1:8000/api/documents
-
-
-# ==============================================================================
-# CORS PREFLIGHT TEST
-# ==============================================================================
-
-### Simulate browser preflight request
-OPTIONS http://127.0.0.1:8000/api/chat-sessions
+### Simulate CORS Browser Preflight (Verify access control headers)
+OPTIONS {{host}}/api/chat-sessions
 Origin: http://localhost:3000
 Access-Control-Request-Method: POST
 Access-Control-Request-Headers: Authorization, Content-Type
 
 
 # ==============================================================================
-# RESPONSE HEADER VERIFICATION
+# 3. AUTHENTICATION BOUNDARY TESTS (get_current_user dependency)
 # ==============================================================================
-# After running any request above, check response headers for:
-#
-#   X-Request-ID: <uuid>           ← unique request identifier
-#   X-Process-Time: <milliseconds> ← request processing duration
-#
-# These are added by RequestLoggingMiddleware
+
+### Missing Authorization Header (Should return 401 Unauthorized)
+GET {{host}}/api/chat-sessions
+
+### Malformed Authorization Format (Should return 401 Unauthorized)
+GET {{host}}/api/chat-sessions
+Authorization: InvalidFormat token123
+
+### Empty Token String (Should return 401 Unauthorized)
+GET {{host}}/api/chat-sessions
+Authorization: Bearer 
+
+
 # ==============================================================================
+# 4. CHAT SESSION RETRIEVAL (get_pagination & get_current_user)
+# ==============================================================================
+
+### List Sessions — Defaults (Page 1, Limit 10)
+GET {{host}}/api/chat-sessions
+Authorization: {{token}}
+
+### List Sessions — Pagination (Custom Page and Limit)
+GET {{host}}/api/chat-sessions?limit=5&page=2
+Authorization: {{token}}
+
+### List Sessions — Filtered Search (Query strings)
+GET {{host}}/api/chat-sessions?search=recursion&limit=5
+Authorization: {{token}}
+
+### List Sessions — Validation Failure (Limit ge bounds: 500 > 100)
+GET {{host}}/api/chat-sessions?limit=500
+Authorization: {{token}}
+
+### List Sessions — Validation Failure (Page ge bounds: 0 < 1)
+GET {{host}}/api/chat-sessions?page=0
+Authorization: {{token}}
+
+### Retrieve Single Session by ID
+GET {{host}}/api/chat-sessions/{{session_id}}
+Authorization: {{token}}
+
+
+# ==============================================================================
+# 5. CONCURRENT RETRIEVAL (asyncio.gather Demonstration)
+# ==============================================================================
+
+### Retrieve Full Session, Messages, and Metadata Concurrently (Completes in ~500ms)
+GET {{host}}/api/chat-sessions/{{session_id}}/full
+Authorization: {{token}}
+
+
+# ==============================================================================
+# 6. CHAT SESSION LIFECYCLE (POST, DELETE, SUMMARY)
+# ==============================================================================
+
+### Create Chat Session — With Title
+POST {{host}}/api/chat-sessions
+Content-Type: application/json
+Authorization: {{token}}
+
+{
+  "title": "Algorithms & Data Structures Study"
+}
+
+### Create Chat Session — Optional Title Omitted (Verify default=None works)
+POST {{host}}/api/chat-sessions
+Content-Type: application/json
+Authorization: {{token}}
+
+{}
+
+### Get Session Summary — Default Format (brief)
+GET {{host}}/api/chat-sessions/{{session_id}}/summary
+Authorization: {{token}}
+
+### Get Session Summary — Detailed Format
+GET {{host}}/api/chat-sessions/{{session_id}}/summary?format=detailed
+Authorization: {{token}}
+
+### Get Session Summary — Validation Failure (nonsense is not in Literal)
+GET {{host}}/api/chat-sessions/{{session_id}}/summary?format=nonsense
+Authorization: {{token}}
+
+### Delete Chat Session (Returns 204. Triggers background audit log task)
+DELETE {{host}}/api/chat-sessions/{{session_id}}
+Authorization: {{token}}
+
+
+# ==============================================================================
+# 7. DOCUMENT MANAGEMENT (Async-converted Route)
+# ==============================================================================
+
+### List Uploaded Study Documents (Converted to async in Exercise 1)
+GET {{host}}/api/documents
+Authorization: {{token}}
+
+
+# ==============================================================================
+# 8. RATE LIMITER STRESS TESTING (In-Memory sliding window check)
+# ==============================================================================
+# Run the requests below rapidly.
+# The limiter permits 10 messages per minute.
+# The 11th request will trigger a "429 Too Many Requests" response instantly.
+# ==============================================================================
+
+### Message 1
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 1" }
+
+### Message 2
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 2" }
+
+### Message 3
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 3" }
+
+### Message 4
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 4" }
+
+### Message 5
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 5" }
+
+### Message 6
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 6" }
+
+### Message 7
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 7" }
+
+### Message 8
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 8" }
+
+### Message 9
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 9" }
+
+### Message 10
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 10" }
+
+### Message 11 (Should fail with 429 and return headers Retry-After: 60)
+POST {{host}}/api/chat-sessions/{{session_id}}/messages
+Content-Type: application/json
+Authorization: {{token}}
+
+{ "content": "Limit test: 11 (Should be rejected)" }
