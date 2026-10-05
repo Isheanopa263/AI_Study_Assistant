@@ -1,33 +1,67 @@
-from datetime import datetime
-from typing import Optional
+from typing import List
+from pydantic import BaseModel, Field, computed_field
 
-from pydantic import BaseModel, Field
+from app.utils.file_helpers import format_file_size
 
 
-class DocumentResponse(BaseModel):
-    """
-    Schema for returning an uploaded document's metadata.
+class DocumentBase(BaseModel):
+    """Base schema containing shared document properties."""
 
-    Full document processing will be implemented in Phase 6.
-    """
+    filename: str = Field(
+        ...,
+        description="Sanitized original filename of the document.",
+        examples=["Computer_Architecture_Notes.pdf"],
+    )
+    file_type: str = Field(
+        ...,
+        description="Extension/type of the document (pdf, docx, txt).",
+        examples=["pdf"],
+    )
+    size_bytes: int = Field(
+        ...,
+        description="Size of the document in bytes.",
+        examples=[2048576],
+    )
+
+
+class DocumentResponse(DocumentBase):
+    """Response schema returned to the client upon upload or retrieval."""
 
     document_id: str = Field(
         ...,
         description="Unique identifier for the document.",
+        examples=["doc_9a8b7c6d5e"],
     )
-    filename: str = Field(
+    user_id: str = Field(
         ...,
-        description="Original filename of the uploaded document.",
+        description="The ID of the user who owns this document.",
+        examples=["stub-user-id"],
     )
-    file_type: str = Field(
+    checksum: str = Field(
         ...,
-        description="Type of document. Supported: pdf, docx, txt.",
+        description="SHA-256 hash of the file content for deduplication and integrity.",
     )
-    size_bytes: int = Field(
+    uploaded_at: str = Field(
         ...,
-        description="File size in bytes.",
+        description="ISO 8601 formatted timestamp of upload.",
+        examples=["2025-01-15T10:00:00+00:00"],
     )
-    uploaded_at: datetime = Field(
-        ...,
-        description="Timestamp when the document was uploaded.",
+
+    @computed_field
+    @property
+    def human_size(self) -> str:
+        """Calculates formatted human-readable size (e.g., '2.00 MB')."""
+        return format_file_size(self.size_bytes)
+
+
+class DocumentListResponse(BaseModel):
+    """Envelope response schema for paginated document lists."""
+
+    documents: List[DocumentResponse] = Field(
+        default=[],
+        description="List of document metadata items.",
+    )
+    total: int = Field(
+        default=0,
+        description="Total number of documents owned by the user.",
     )

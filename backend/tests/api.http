@@ -227,3 +227,56 @@ Content-Type: application/json
 Authorization: {{token}}
 
 { "content": "Limit test: 11 (Should be rejected)" }
+
+# ==============================================================================
+# 7. DOCUMENT MANAGEMENT & FILE UPLOADS
+# ==============================================================================
+
+### List Documents — Initially Empty
+GET {{host}}/api/documents
+Authorization: {{token}}
+
+
+### Upload Valid TXT File (Multipart form data)
+POST {{host}}/api/documents/upload
+Authorization: {{token}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="lecture_notes.txt"
+Content-Type: text/plain
+
+Data Structures & Algorithms - Week 1:
+Stacks, Queues, and Linked Lists.
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+
+### Upload Invalid File Extension (.py should return 422)
+POST {{host}}/api/documents/upload
+Authorization: {{token}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="script.py"
+Content-Type: text/plain
+
+print("Malicious script execution attempt")
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+
+### Upload Invalid MIME Type (application/json should return 422)
+POST {{host}}/api/documents/upload
+Authorization: {{token}}
+Content-Type: multipart/form-data; boundary=----WebKitFormBoundary7MA4YWxkTrZu0gW
+
+------WebKitFormBoundary7MA4YWxkTrZu0gW
+Content-Disposition: form-data; name="file"; filename="notes.txt"
+Content-Type: application/json
+
+{"data": "invalid mime"}
+------WebKitFormBoundary7MA4YWxkTrZu0gW--
+
+
+### List Documents — Verify Uploaded File Appears
+GET {{host}}/api/documents
+Authorization: {{token}}
