@@ -3,25 +3,24 @@ from app.core.logging import setup_logging
 # Setup logging FIRST before anything else
 setup_logging()
 
-# Now import everything else
+import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.chat import router as chat_router
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
+from app.api.system import router as system_router
 from app.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.middleware import RequestLoggingMiddleware
-
-import logging
 
 logger = logging.getLogger(__name__)
 
 
 def create_application() -> FastAPI:
     """
-    Creates and configures the FastAPI application.
+    Creates and configures the FastAPI application factory.
     """
     application = FastAPI(
         title=settings.APP_NAME,
@@ -58,6 +57,7 @@ def create_application() -> FastAPI:
     application.include_router(health_router)
     application.include_router(chat_router)
     application.include_router(documents_router)
+    application.include_router(system_router)
 
     logger.info(
         "Application ready. name=%s version=%s debug=%s origins=%s",
