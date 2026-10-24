@@ -10,7 +10,7 @@ async def test_list_documents_empty_initially(
 ):
     """Verify documents list is empty on fresh state."""
     # Act
-    response = await client.get("/api/documents", headers=auth_headers)
+    response = await client.get("/api/documents/", headers=auth_headers)
 
     # Assert
     assert response.status_code == 200

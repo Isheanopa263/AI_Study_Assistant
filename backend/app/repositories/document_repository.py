@@ -1,74 +1,69 @@
-import logging
-from typing import Dict, List, Optional
+# app/repositories/document_repository.py
+"""
+Document repository backed by MongoDB.
 
-logger = logging.getLogger(__name__)
+Manages the 'documents' collection.
+Replaces the Phase 2 in-memory dict storage.
+"""
+
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from app.repositories.base import BaseRepository
 
 
-class DocumentRepository:
-    """
-    Repository for document metadata persistence.
+class DocumentRepository(BaseRepository):
+    """MongoDB-backed repository for document metadata."""
 
-    Abstracts all database operations for documents.
-    In Phase 3, this class will execute asynchronous queries against MongoDB.
-    Currently uses in-memory storage that resets when the server restarts.
-    """
-
-    def __init__(self):
-        # In-memory storage: { document_id: document_dict }
-        self._storage: Dict[str, dict] = {}
+    def __init__(self, db: AsyncIOMotorDatabase):
+        super().__init__(db, collection_name="documents")
 
     async def create(self, document_data: dict) -> dict:
         """
-        Store a new document metadata record.
+        Insert a new document record.
 
-        Args:
-            document_data: Dictionary containing validated document attributes.
+        MongoDB auto-generates _id (ObjectId). We map it to 'document_id'
+        to match the DocumentResponse schema.
 
-        Returns:
-            The saved document record.
+        Returns the full saved document dict with document_id set.
         """
-        doc_id = document_data["document_id"]
-        self._storage[doc_id] = document_data
-        logger.debug("Document saved to repository. document_id=%s", doc_id)
-        return document_data
+        result = await self.collection.insert_one(document_data)
+        document_data["_id"] = result.inserted_id
+        return self._to_str_id(document_data, id_field="document_id")
 
-    async def get_by_id(self, document_id: str) -> Optional[dict]:
-        """Retrieve a document record by its unique ID."""
-        return self._storage.get(document_id)
+    async def get_by_id(self, document_id: str) -> dict | None:
+        """Find a single document by its document_id."""
+        try:
+            object_id = self._to_object_id(document_id)
+        except ValueError:
+            return None
+        document = await self.collection.find_one({"_id": object_id})
+        return self._to_str_id(document, id_field="document_id")
 
-    async def get_by_user_id(self, user_id: str) -> List[dict]:
-        """Retrieve all documents belonging to a specific user."""
+    async def get_by_checksum(self, user_id: str, checksum: str) -> dict | None:
+        """Find a document by user_id + checksum (for deduplication)."""
+        document = await self.collection.find_one({
+            "user_id": user_id,
+            "checksum": checksum,
+        })
+        return self._to_str_id(document, id_field="document_id")
+
+    async def get_by_user_id(self, user_id: str) -> list[dict]:
+        """Fetch all documents belonging to a user."""
+        cursor = self.collection.find({"user_id": user_id})
+        documents = await cursor.to_list(length=500)
         return [
-            doc for doc in self._storage.values()
-            if doc.get("user_id") == user_id
+            self._to_str_id(doc, id_field="document_id") for doc in documents
         ]
 
-    async def get_by_checksum(
-        self,
-        user_id: str,
-        checksum: str,
-    ) -> Optional[dict]:
-        """
-        Retrieve a document by its checksum for a specific user.
-        Used to detect duplicate uploads.
-        """
-        for doc in self._storage.values():
-            if doc.get("user_id") == user_id and doc.get("checksum") == checksum:
-                return doc
-        return None
-
     async def delete(self, document_id: str) -> bool:
-        """
-        Delete a document record by ID.
+        """Delete a document by ID. Returns True if deleted."""
+        try:
+            object_id = self._to_object_id(document_id)
+        except ValueError:
+            return False
+        result = await self.collection.delete_one({"_id": object_id})
+        return result.deleted_count > 0
 
-        Returns True if deleted, False if not found.
-        """
-        if document_id in self._storage:
-            del self._storage[document_id]
-            logger.debug("Document deleted from repository. document_id=%s", document_id)
-            return True
-        return False
-
-
-# Global singleton instance for the application
-document_repository = DocumentRepository()
+    async def count(self) -> int:
+        """Return the total number of documents."""
+        return await self.collection.count_documents({})

@@ -1,13 +1,19 @@
+# app/services/document_service.py
+"""
+Service layer for document processing and business rules.
+Phase 3: No longer uses a global repository singleton.
+         The repository is injected via the constructor.
+"""
+
 import hashlib
 import logging
-import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
 from fastapi import UploadFile
 
 from app.core.exceptions import DocumentProcessingException, NotFoundException
-from app.repositories.document_repository import DocumentRepository, document_repository
+from app.repositories.document_repository import DocumentRepository  # ← CHANGED (removed document_repository import)
 from app.utils.file_helpers import get_file_extension, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -25,7 +31,7 @@ CHUNK_SIZE = 64 * 1024  # 64 KB chunks
 class DocumentService:
     """Service layer for document processing and business rules."""
 
-    def __init__(self, repo: DocumentRepository = document_repository):
+    def __init__(self, repo: DocumentRepository):  # ← CHANGED (removed default=document_repository)
         self.repo = repo
 
     async def process_and_save_upload(
@@ -96,9 +102,7 @@ class DocumentService:
 
         checksum = hasher.hexdigest()
 
-        # ------------------------------------------------------------------
-        # CHALLENGE SOLUTION: Duplicate Detection
-        # ------------------------------------------------------------------
+        # Duplicate Detection
         existing_doc = await self.repo.get_by_checksum(user_id=user_id, checksum=checksum)
         if existing_doc:
             logger.info(
@@ -110,9 +114,9 @@ class DocumentService:
             return existing_doc
 
         # 4. Create Document Record
-        doc_id = f"doc_{uuid.uuid4().hex[:12]}"
+        # NOTE: document_id is no longer generated here.
+        # MongoDB auto-generates _id, and the repository maps it to document_id.
         document_data = {
-            "document_id": doc_id,
             "user_id": user_id,
             "filename": clean_filename,
             "file_type": extension.lstrip("."),
@@ -124,7 +128,7 @@ class DocumentService:
         saved_doc = await self.repo.create(document_data)
         logger.info(
             "Document uploaded successfully. doc_id=%s user_id=%s size=%s",
-            doc_id,
+            saved_doc["document_id"],
             user_id,
             total_size,
         )
@@ -144,10 +148,6 @@ class DocumentService:
 
     async def delete_document(self, document_id: str, user_id: str) -> None:
         """Delete a document verifying ownership."""
-        # Verifies ownership via get_document_by_id first
         await self.get_document_by_id(document_id, user_id)
         await self.repo.delete(document_id)
         logger.info("Document deleted. doc_id=%s user_id=%s", document_id, user_id)
-
-
-document_service = DocumentService()

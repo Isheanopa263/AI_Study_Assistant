@@ -1,70 +1,56 @@
-from typing import AsyncGenerator, Dict
+# tests/conftest.py
+"""
+Shared test fixtures for the AI Study Assistant test suite.
+Phase 3: Uses a separate MongoDB test database.
+"""
 
 import pytest
-from httpx import ASGITransport, AsyncClient
+from httpx import AsyncClient, ASGITransport
+from motor.motor_asyncio import AsyncIOMotorClient
 
-from app.core.rate_limiter import rate_limiter
 from app.main import app
-from app.repositories.document_repository import document_repository
+from app.core.rate_limiter import rate_limiter
 
+TEST_MONGODB_URI = "mongodb://localhost:27017"
+TEST_DB_NAME = "study_assistant_test"
 
-# ------------------------------------------------------------------------------
-# FIXTURE: HTTP Test Client
-# ------------------------------------------------------------------------------
 
 @pytest.fixture
-async def client() -> AsyncGenerator[AsyncClient, None]:
-    """
-    Creates an asynchronous in-memory HTTP client connected to FastAPI.
-    
-    raise_app_exceptions=False ensures that 500 errors are returned as HTTP 
-    responses (just like in real production) instead of crashing the test runner.
-    """
-    transport = ASGITransport(app=app, raise_app_exceptions=False)
-    async with AsyncClient(transport=transport, base_url="http://testserver") as async_client:
-        yield async_client
+async def test_db_client():
+    """Motor client for the test database. Created per-test to avoid scope issues."""
+    client = AsyncIOMotorClient(TEST_MONGODB_URI)
+    await client.admin.command("ping")
+    yield client
+    client.close()
 
-
-# ------------------------------------------------------------------------------
-# FIXTURE: Mock Authenticated User
-# ------------------------------------------------------------------------------
-
-@pytest.fixture
-def mock_user() -> Dict[str, str]:
-    """Returns standard authenticated student user data."""
-    return {
-        "user_id": "test_student_123",
-        "email": "student@university.edu",
-        "name": "Test Student",
-    }
-
-
-# ------------------------------------------------------------------------------
-# FIXTURE: Auth Headers
-# ------------------------------------------------------------------------------
-
-@pytest.fixture
-def auth_headers() -> Dict[str, str]:
-    """Returns valid Authorization headers for authenticated requests."""
-    return {"Authorization": "Bearer test-valid-token"}
-
-
-# ------------------------------------------------------------------------------
-# FIXTURE: Clean State Before and After EVERY Test
-# ------------------------------------------------------------------------------
 
 @pytest.fixture(autouse=True)
-def clean_state():
-    """
-    Automatically runs before and after EVERY test function.
-    Guarantees total test isolation:
-    - Clears in-memory document storage
-    - Resets sliding window rate limiter counters
-    """
-    # Pre-test cleanup
-    document_repository._storage.clear()
+async def clean_test_database(test_db_client):
+    """Wipe the test database before and after every test."""
+    db = test_db_client[TEST_DB_NAME]
+
+    for name in await db.list_collection_names():
+        await db[name].delete_many({})
     rate_limiter._requests.clear()
+
     yield
-    # Post-test cleanup
-    document_repository._storage.clear()
+
+    for name in await db.list_collection_names():
+        await db[name].delete_many({})
     rate_limiter._requests.clear()
+
+
+@pytest.fixture
+async def client(test_db_client):
+    """HTTP client that uses the test database."""
+    app.state.db = test_db_client[TEST_DB_NAME]
+
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://testserver") as ac:
+        yield ac
+
+
+@pytest.fixture
+def auth_headers():
+    """Authentication headers for protected endpoints."""
+    return {"Authorization": "Bearer test-token-123"}

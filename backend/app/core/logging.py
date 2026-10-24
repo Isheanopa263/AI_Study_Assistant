@@ -64,6 +64,8 @@ def setup_logging(log_level: Optional[str] = None) -> None:
     logging.getLogger("uvicorn.error").setLevel(logging.ERROR)
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("pymongo").setLevel(logging.WARNING)
+    logging.getLogger("motor").setLevel(logging.WARNING)
 
     # --------------------------------------------------------------------------
     # LOG STARTUP CONFIRMATION

@@ -87,13 +87,13 @@ class Settings(BaseSettings):
     # MongoDB connection will be used in Phase 3.
     # --------------------------------------------------------------------------
 
-    MONGODB_URL: str = Field(
+    MONGODB_URI: str = Field(
         default="mongodb://localhost:27017",
-        description="MongoDB connection string.",
+        description="MongoDB connection string (local or Atlas)",
     )
     MONGODB_DB_NAME: str = Field(
-        default="ai_study_assistant_dev",
-        description="MongoDB database name.",
+        default="study_assistant",
+        description="Name of the MongoDB database",
     )
 
     # --------------------------------------------------------------------------

@@ -1,97 +1,72 @@
+# app/api/documents.py
+"""
+Document upload and management endpoints.
+Phase 3: Uses MongoDB via DocumentService + DocumentRepository.
+"""
+
 import logging
 
-from fastapi import APIRouter, Depends, File, Path, UploadFile, status
+from fastapi import APIRouter, Depends, File, UploadFile
 
-from app.core.dependencies import get_current_user
-from app.schemas.document import DocumentListResponse, DocumentResponse
-from app.services.document_service import DocumentService, document_service
+from app.core.dependencies import get_current_user, get_document_repo, get_pagination
+from app.core.exceptions import NotFoundException
+from app.repositories.document_repository import DocumentRepository
+from app.schemas.chat import PaginationParams
+from app.schemas.document import DocumentResponse, DocumentListResponse
+from app.services.document_service import DocumentService
 
 logger = logging.getLogger(__name__)
-
-router = APIRouter(
-    prefix="/api",
-    tags=["Documents"],
-)
+router = APIRouter(prefix="/api/documents", tags=["Documents"])
 
 
-def get_document_service() -> DocumentService:
-    """Dependency provider for DocumentService."""
-    return document_service
+def _get_document_service(
+    repo: DocumentRepository = Depends(get_document_repo),
+) -> DocumentService:
+    """Create a DocumentService with the injected repository."""
+    return DocumentService(repo=repo)
 
 
-@router.get(
-    "/documents",
-    response_model=DocumentListResponse,
-    summary="List all uploaded study documents",
-)
-async def get_documents(
-    current_user: dict = Depends(get_current_user),
-    service: DocumentService = Depends(get_document_service),
-):
-    """Retrieve all study documents uploaded by the authenticated student."""
-    docs = await service.list_user_documents(user_id=current_user["user_id"])
-    return DocumentListResponse(
-        documents=docs,
-        total=len(docs),
-    )
-
-
-@router.get(
-    "/documents/{document_id}",
-    response_model=DocumentResponse,
-    summary="Get document details by ID",
-)
-async def get_document(
-    document_id: str = Path(..., description="The unique ID of the document."),
-    current_user: dict = Depends(get_current_user),
-    service: DocumentService = Depends(get_document_service),
-):
-    """Retrieve metadata for a specific uploaded document."""
-    return await service.get_document_by_id(
-        document_id=document_id,
-        user_id=current_user["user_id"],
-    )
-
-
-@router.post(
-    "/documents/upload",
-    response_model=DocumentResponse,
-    status_code=status.HTTP_201_CREATED,
-    summary="Upload a study document (PDF, DOCX, TXT)",
-)
+@router.post("/upload", response_model=DocumentResponse, status_code=201)
 async def upload_document(
-    file: UploadFile = File(..., description="The study document file to upload."),
-    current_user: dict = Depends(get_current_user),
-    service: DocumentService = Depends(get_document_service),
+    file: UploadFile = File(...),
+    user: dict = Depends(get_current_user),
+    service: DocumentService = Depends(_get_document_service),
 ):
-    """Upload and validate a study document."""
-    logger.info(
-        "Upload request received. user_id=%s filename=%s",
-        current_user["user_id"],
-        file.filename,
+    """Upload a document and store its metadata in MongoDB."""
+    result = await service.process_and_save_upload(file, user["user_id"])
+    return DocumentResponse(**result)
+
+
+@router.get("/", response_model=DocumentListResponse)
+async def list_documents(
+    pagination: PaginationParams = Depends(get_pagination),
+    user: dict = Depends(get_current_user),
+    service: DocumentService = Depends(_get_document_service),
+):
+    """List all uploaded documents for the current user."""
+    documents = await service.list_user_documents(user["user_id"])
+    return DocumentListResponse(
+        documents=[DocumentResponse(**doc) for doc in documents],
+        total=len(documents),
     )
 
-    created_doc = await service.process_and_save_upload(
-        file=file,
-        user_id=current_user["user_id"],
-    )
 
-    return created_doc
+@router.get("/{document_id}", response_model=DocumentResponse)
+async def get_document(
+    document_id: str,
+    user: dict = Depends(get_current_user),
+    service: DocumentService = Depends(_get_document_service),
+):
+    """Get a single document by ID."""
+    doc = await service.get_document_by_id(document_id, user["user_id"])
+    return DocumentResponse(**doc)
 
 
-@router.delete(
-    "/documents/{document_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
-    summary="Delete an uploaded study document",
-)
+@router.delete("/{document_id}", status_code=204)
 async def delete_document(
-    document_id: str = Path(..., description="The unique ID of the document to delete."),
-    current_user: dict = Depends(get_current_user),
-    service: DocumentService = Depends(get_document_service),
+    document_id: str,
+    user: dict = Depends(get_current_user),
+    service: DocumentService = Depends(_get_document_service),
 ):
-    """Delete a specific document record."""
-    await service.delete_document(
-        document_id=document_id,
-        user_id=current_user["user_id"],
-    )
-    return None
+    """Delete a document by ID."""
+    await service.delete_document(document_id, user["user_id"])

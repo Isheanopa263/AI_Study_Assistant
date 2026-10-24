@@ -1,90 +1,92 @@
-from typing import Optional
-from fastapi import Depends, Header, HTTPException, status, Query
+# app/core/dependencies.py
+"""
+FastAPI dependencies for authentication, pagination, and repository injection.
+
+Phase 2: get_current_user, get_pagination, get_token_from_header, get_optional_user
+Phase 3: get_document_repo, get_chat_repo, get_document_service
+"""
+
+from fastapi import Depends, Header, HTTPException, Query
+from motor.motor_asyncio import AsyncIOMotorDatabase
+
+from app.core.database import get_db
+from app.repositories.document_repository import DocumentRepository
+from app.repositories.chat_repository import ChatRepository
 from app.schemas.chat import PaginationParams
 
-def get_pagination(
-    limit: int = Query(
-        default=10, 
-        ge=1, le=100, 
-        description="Number of items to returned per page"
-    ),
-    
-    page: int = Query(
-        default=1, 
-        ge=1, 
-        description="Page number starting from 1"
-    ),
-)-> PaginationParams:
+
+# ──────────────────────────────────────────────
+# AUTHENTICATION (Phase 2 — unchanged)
+# ──────────────────────────────────────────────
+
+async def get_token_from_header(
+    authorization: str | None = Header(default=None),
+) -> str:
+    """Extract the Bearer token from the Authorization header."""
+    if authorization is None:
+        raise HTTPException(status_code=401, detail="Missing Authorization header")
+    if not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Invalid Authorization scheme")
+    token = authorization.split(" ", 1)[1]
+    if not token:
+        raise HTTPException(status_code=401, detail="Empty token")
+    return token
+
+
+async def get_current_user(
+    token: str = Depends(get_token_from_header),
+) -> dict:
     """
-    Extracts pagination parameters from the request query string
-    Calculates the offset for database queries automatically
+    Validate the token and return the current user.
+
+    STUB: accepts any non-empty Bearer token.
+    Will be replaced with JWT verification in Phase 5.
     """
+    return {
+        "user_id": "stub-user-id",
+        "email": "student@example.com",
+        "name": "Test Student",
+    }
+
+
+async def get_optional_user(
+    authorization: str | None = Header(default=None),
+) -> dict | None:
+    """Return the current user if a token is provided, else None."""
+    if authorization is None:
+        return None
+    try:
+        token = await get_token_from_header(authorization)
+        return await get_current_user(token)
+    except HTTPException:
+        return None
+
+
+# ──────────────────────────────────────────────
+# PAGINATION (Phase 2 — unchanged)
+# ──────────────────────────────────────────────
+
+async def get_pagination(
+    limit: int = Query(default=10, ge=1, le=100, description="Items per page"),
+    page: int = Query(default=1, ge=1, description="Page number (starts at 1)"),
+) -> PaginationParams:
+    """Parse and validate pagination query parameters."""
     return PaginationParams(limit=limit, page=page)
 
-def get_token_from_header(
-    authorization: Optional[str] = Header(
-    default=None, 
-        description="Authorization token in the format 'Bearer <token>'"
-    ),
-)-> str:
-    """
-    Extracts the token from the Authorization header
-    Raises an HTTPException (401) if the header is missing or malformed
-    """
-    if authorization is None:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Authorization header missing",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    if not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authorization header format, expected 'Bearer <token>'",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-        
-    token = authorization.split(" ")[1]
-    
-    if not token:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token is empty",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
-    
-    
-    return token
-    
-def get_current_user(
-    token : str = Depends(get_token_from_header)
-)-> dict:
-    """
-    returns the cuurent authenticated user based on the provided token.
-    currently it returns a stub user
-    """
-    return {
-        "user_id": "stub_user_id",
-        "name": "Study Student",
-        "email": "student@example.com"
-    }
-    
-def get_optional_user(
-    authorization: Optional[str] = Header(default=None),
-)->Optional[dict]:
-    """
-    Returns the current user if authenticated, otherwise returns None.
-    Does not raise an exception for missing or invalid tokens.
-    Useful for endpoints that can be accessed by both authenticated and anonymous users.
-    """
-    if authorization is None:
-        return None
-    if not authorization.startswith("Bearer "):
-        return None
-    
-    return {
-        "user_id": "stub_user_id",
-        "name": "Study Student",
-        "email": "student@example.com",
-    }
+
+# ──────────────────────────────────────────────
+# REPOSITORIES (Phase 3 — NEW)
+# ──────────────────────────────────────────────
+
+async def get_document_repo(
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> DocumentRepository:
+    """Dependency that provides a DocumentRepository instance."""
+    return DocumentRepository(db)
+
+
+async def get_chat_repo(
+    db: AsyncIOMotorDatabase = Depends(get_db),
+) -> ChatRepository:
+    """Dependency that provides a ChatRepository instance."""
+    return ChatRepository(db)
