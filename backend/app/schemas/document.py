@@ -1,67 +1,58 @@
-from typing import List
-from pydantic import BaseModel, Field, computed_field
+# backend/app/schemas/document.py
+from datetime import datetime
+from typing import Optional
 
-from app.utils.file_helpers import format_file_size
+from pydantic import Field
 
-
-class DocumentBase(BaseModel):
-    """Base schema containing shared document properties."""
-
-    filename: str = Field(
-        ...,
-        description="Sanitized original filename of the document.",
-        examples=["Computer_Architecture_Notes.pdf"],
-    )
-    file_type: str = Field(
-        ...,
-        description="Extension/type of the document (pdf, docx, txt).",
-        examples=["pdf"],
-    )
-    size_bytes: int = Field(
-        ...,
-        description="Size of the document in bytes.",
-        examples=[2048576],
-    )
+from app.schemas.base import MongoModel, ObjectIdStr
 
 
-class DocumentResponse(DocumentBase):
-    """Response schema returned to the client upon upload or retrieval."""
-
-    document_id: str = Field(
-        ...,
-        description="Unique identifier for the document.",
-        examples=["doc_9a8b7c6d5e"],
-    )
-    user_id: str = Field(
-        ...,
-        description="The ID of the user who owns this document.",
-        examples=["stub-user-id"],
-    )
-    checksum: str = Field(
-        ...,
-        description="SHA-256 hash of the file content for deduplication and integrity.",
-    )
-    uploaded_at: str = Field(
-        ...,
-        description="ISO 8601 formatted timestamp of upload.",
-        examples=["2025-01-15T10:00:00+00:00"],
-    )
-
-    @computed_field
-    @property
-    def human_size(self) -> str:
-        """Calculates formatted human-readable size (e.g., '2.00 MB')."""
-        return format_file_size(self.size_bytes)
+class DocumentBase(MongoModel):
+    """Base fields shared by all document schemas."""
+    title: str = Field(..., min_length=1, max_length=255)
+    file_type: str = Field(..., min_length=1, max_length=20)
+    file_size: int = Field(..., ge=0)
+    tags: list[str] = Field(default_factory=list)
 
 
-class DocumentListResponse(BaseModel):
-    """Envelope response schema for paginated document lists."""
+class DocumentCreate(DocumentBase):
+    """Schema for creating a new document (used internally)."""
+    user_id: str
+    content: str = ""
+    chunk_count: int = 0
 
-    documents: List[DocumentResponse] = Field(
-        default=[],
-        description="List of document metadata items.",
-    )
-    total: int = Field(
-        default=0,
-        description="Total number of documents owned by the user.",
-    )
+
+class DocumentResponse(MongoModel):
+    """Schema for returning a document to the API client."""
+    document_id: ObjectIdStr = Field(alias="id")
+    user_id: str
+    title: str
+    file_type: str
+    file_size: int
+    content: str = ""
+    chunk_count: int = 0
+    tags: list[str] = []
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    model_config = MongoModel.model_config | {
+        "populate_by_name": True,
+    }
+
+    @classmethod
+    def from_mongo(cls, data: dict) -> Optional["DocumentResponse"]:
+        """Override to map _id → document_id instead of _id → id."""
+        if data is None:
+            return None
+        data = dict(data)
+        if "_id" in data:
+            data["document_id"] = str(data.pop("_id"))
+        return cls(**data)
+
+
+class DocumentListResponse(MongoModel):
+    """Schema for paginated document lists."""
+    documents: list[DocumentResponse]
+    total: int
+    page: int
+    limit: int

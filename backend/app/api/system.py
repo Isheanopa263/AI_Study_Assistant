@@ -11,6 +11,8 @@ from app.schemas.system import SystemStatusResponse, SystemMetrics
 from app.core.dependencies import get_current_user, get_document_repo
 from app.core.rate_limiter import rate_limiter
 from app.repositories.document_repository import DocumentRepository
+from app.core.database import get_db
+from motor.motor_asyncio import AsyncIOMotorDatabase
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/system", tags=["System"])
@@ -50,3 +52,16 @@ async def get_system_status(
         metrics=metrics,
         status=status,
     )
+    
+@router.get("/indexes")
+async def list_indexes(db: AsyncIOMotorDatabase = Depends(get_db)):
+    """List all indexes across all collections (dev only)."""
+    result = {}
+    for collection_name in await db.list_collection_names():
+        collection = db[collection_name]
+        indexes = await collection.index_information()
+        result[collection_name] = [
+            {"name": name, "keys": info["key"]}
+            for name, info in indexes.items()
+        ]
+    return result

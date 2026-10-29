@@ -1,4 +1,3 @@
-# app/api/documents.py
 """
 Document upload and management endpoints.
 Phase 3: Uses MongoDB via DocumentService + DocumentRepository.
@@ -26,7 +25,12 @@ def _get_document_service(
     return DocumentService(repo=repo)
 
 
-@router.post("/upload", response_model=DocumentResponse, status_code=201)
+@router.post(
+    "/upload",
+    response_model=DocumentResponse,
+    response_model_by_alias=False,
+    status_code=201,
+)
 async def upload_document(
     file: UploadFile = File(...),
     user: dict = Depends(get_current_user),
@@ -37,21 +41,35 @@ async def upload_document(
     return DocumentResponse(**result)
 
 
-@router.get("/", response_model=DocumentListResponse)
+@router.get(
+    "/",
+    response_model=DocumentListResponse,
+    response_model_by_alias=False,
+)
 async def list_documents(
     pagination: PaginationParams = Depends(get_pagination),
     user: dict = Depends(get_current_user),
     service: DocumentService = Depends(_get_document_service),
 ):
     """List all uploaded documents for the current user."""
-    documents = await service.list_user_documents(user["user_id"])
+    docs, total = await service.list_user_documents(
+        user["user_id"],
+        skip=pagination.offset,
+        limit=pagination.limit,
+    )
     return DocumentListResponse(
-        documents=[DocumentResponse(**doc) for doc in documents],
-        total=len(documents),
+        documents=[DocumentResponse(**doc) for doc in docs],
+        total=total,
+        page=pagination.page,
+        limit=pagination.limit,
     )
 
 
-@router.get("/{document_id}", response_model=DocumentResponse)
+@router.get(
+    "/{document_id}",
+    response_model=DocumentResponse,
+    response_model_by_alias=False,
+)
 async def get_document(
     document_id: str,
     user: dict = Depends(get_current_user),

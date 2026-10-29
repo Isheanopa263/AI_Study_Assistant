@@ -1,4 +1,3 @@
-# app/api/chat.py
 """
 Chat session and message endpoints.
 Phase 3: Uses MongoDB via ChatRepository.
@@ -30,7 +29,12 @@ router = APIRouter(prefix="/api/chat", tags=["Chat"])
 # ── SESSIONS ──
 
 
-@router.post("/sessions", response_model=ChatSessionResponse, status_code=201)
+@router.post(
+    "/sessions",
+    response_model=ChatSessionResponse,
+    response_model_by_alias=False,
+    status_code=201,
+)
 async def create_session(
     session_in: ChatSessionCreate,
     user: dict = Depends(get_current_user),
@@ -43,10 +47,14 @@ async def create_session(
     )
     session = await repo.get_session(session_id)
     logger.info("Session created: id=%s user=%s", session_id, user["user_id"])
-    return ChatSessionResponse(**session)
+    return ChatSessionResponse.from_mongo(session)
 
 
-@router.get("/sessions", response_model=ChatSessionListResponse)
+@router.get(
+    "/sessions",
+    response_model=ChatSessionListResponse,
+    response_model_by_alias=False,
+)
 async def list_sessions(
     pagination: PaginationParams = Depends(get_pagination),
     user: dict = Depends(get_current_user),
@@ -67,7 +75,11 @@ async def list_sessions(
     )
 
 
-@router.get("/sessions/{session_id}", response_model=ChatSessionResponse)
+@router.get(
+    "/sessions/{session_id}",
+    response_model=ChatSessionResponse,
+    response_model_by_alias=False,
+)
 async def get_session(
     session_id: str,
     user: dict = Depends(get_current_user),
@@ -99,6 +111,7 @@ async def delete_session(
 @router.post(
     "/sessions/{session_id}/messages",
     response_model=MessageResponse,
+    response_model_by_alias=False,
     status_code=201,
 )
 async def send_message(
@@ -109,12 +122,10 @@ async def send_message(
     _: bool = Depends(check_rate_limit),
 ):
     """Send a message in a chat session."""
-    # Verify session exists
     session = await repo.get_session(session_id)
     if not session:
         raise NotFoundException(resource="ChatSession", resource_id=session_id)
 
-    # Save user message (role is always "user" from the student)
     message = await repo.add_message(
         session_id=session_id,
         role="user",
@@ -128,6 +139,7 @@ async def send_message(
 @router.get(
     "/sessions/{session_id}/messages",
     response_model=MessageListResponse,
+    response_model_by_alias=False,
 )
 async def get_messages(
     session_id: str,
@@ -156,7 +168,11 @@ async def get_messages(
 # ── SUMMARY ──
 
 
-@router.get("/sessions/{session_id}/summary", response_model=SessionSummaryResponse)
+@router.get(
+    "/sessions/{session_id}/summary",
+    response_model=SessionSummaryResponse,
+    response_model_by_alias=False,
+)
 async def get_session_summary(
     session_id: str,
     user: dict = Depends(get_current_user),
@@ -175,7 +191,11 @@ async def get_session_summary(
         message_count=count,
     )
 
-@router.get("/sessions/{session_id}/full")
+
+@router.get(
+    "/sessions/{session_id}/full",
+    response_model_by_alias=False,
+)
 async def get_full_conversation(
     session_id: str,
     user: dict = Depends(get_current_user),

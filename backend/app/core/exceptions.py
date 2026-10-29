@@ -1,10 +1,13 @@
 import logging
 import uuid
 from typing import Any, Optional
+from pymongo.errors import PyMongoError
 
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+
+
 
 # ------------------------------------------------------------------------------
 # Logger setup for this module
@@ -141,6 +144,14 @@ class DocumentProcessingException(StudyAssistantException):
         )
 
 
+
+class DatabaseException(StudyAssistantException):
+    """Raised when a database operation fails unexpectedly."""
+
+    def __init__(self, message: str = "Database operation failed"):
+        super().__init__(message=message, status_code=503)
+        
+        
 # ------------------------------------------------------------------------------
 # HELPER FUNCTION: Build consistent error response body
 # ------------------------------------------------------------------------------
@@ -340,3 +351,22 @@ def register_exception_handlers(app: FastAPI) -> None:
     app.add_exception_handler(HTTPException, http_exception_handler)
     app.add_exception_handler(RequestValidationError, validation_exception_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
+    
+
+async def motor_exception_handler(request: Request, exc: PyMongoError):
+    """
+    Global catch-all for unhandled MongoDB errors.
+
+    Returns a clean 503 response instead of leaking stack traces.
+    """
+    logger.error(
+        f"Unhandled MongoDB error on {request.method} {request.url.path}: {exc}",
+        exc_info=True,
+    )
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": "Database service temporarily unavailable. Please try again later.",
+            "error_code": "DATABASE_ERROR",
+        },
+    )

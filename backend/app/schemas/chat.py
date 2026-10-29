@@ -1,20 +1,14 @@
 from datetime import datetime
 from typing import List, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, computed_field
+from app.schemas.base import MongoModel, ObjectIdStr
 
 # ------------------------------------------------------------------------------
 # PAGINATION SCHEMA
 # ------------------------------------------------------------------------------
 
 class PaginationParams(BaseModel):
-    """
-    represent extracted and validated pagination parameters
-    
-    created by the get_pagination dependency
-    injected into endpoints that support pagination
-    """
-
     limit: int = Field(
         default=10,
         ge=1,
@@ -29,11 +23,8 @@ class PaginationParams(BaseModel):
 
     @property
     def offset(self) -> int:
-        """
-        Calculates the offset for database queries based on the current page and limit.
-        """
         return (self.page - 1) * self.limit
-    
+
 
 # ------------------------------------------------------------------------------
 # MESSAGE SCHEMAS
@@ -41,13 +32,6 @@ class PaginationParams(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    """
-    Schema for creating a new chat message.
-
-    This model validates the request body when a student sends a message.
-    FastAPI uses this to automatically validate and parse the JSON body.
-    """
-
     content: str = Field(
         ...,
         min_length=1,
@@ -57,34 +41,20 @@ class MessageCreate(BaseModel):
     )
 
 
-class MessageResponse(BaseModel):
-    """
-    Schema for returning a single message in API responses.
+class MessageResponse(MongoModel):
+    message_id: ObjectIdStr = Field(alias="id")
+    content: str
+    role: str = "user"
+    created_at: datetime
 
-    This model shapes the response the client receives.
-    It ensures sensitive internal fields are never exposed.
-    """
-
-    message_id: str = Field(
-        ...,
-        description="Unique identifier for this message.",
-    )
-    session_id: str = Field(
-        ...,
-        description="The chat session this message belongs to.",
-    )
-    role: str = Field(
-        ...,
-        description="Who sent the message. Either 'user' or 'assistant'.",
-    )
-    content: str = Field(
-        ...,
-        description="The message content.",
-    )
-    created_at: str = Field(
-        ...,
-        description="Timestamp when the message was created.",
-    )
+    @classmethod
+    def from_mongo(cls, data: dict) -> Optional["MessageResponse"]:
+        if data is None:
+            return None
+        data = dict(data)
+        if "_id" in data:
+            data["message_id"] = str(data.pop("_id"))
+        return cls(**data)
 
 
 # ------------------------------------------------------------------------------
@@ -93,13 +63,6 @@ class MessageResponse(BaseModel):
 
 
 class ChatSessionCreate(BaseModel):
-    """
-    Schema for creating a new chat session.
-
-    A chat session represents one conversation thread.
-    The title is optional and can be auto-generated from the first message later.
-    """
-
     title: Optional[str] = Field(
         default=None,
         min_length=1,
@@ -109,37 +72,25 @@ class ChatSessionCreate(BaseModel):
     )
 
 
-class ChatSessionResponse(BaseModel):
-    """
-    Schema for returning a chat session in API responses.
-    """
+class ChatSessionResponse(MongoModel):
+    session_id: ObjectIdStr = Field(alias="id")
+    user_id: str
+    title: Optional[str] = None
+    message_count: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None
 
-    session_id: str = Field(
-        ...,
-        description="Unique identifier for the chat session.",
-    )
-    title: Optional[str] = Field(
-        default=None,
-        description="Title of the chat session.",
-    )
-    created_at: str = Field(
-        ...,
-        description="Timestamp when the session was created.",
-    )
-    message_count: int = Field(
-        default=0,
-        description="Total number of messages in this session.",
-    )
+    @classmethod
+    def from_mongo(cls, data: dict) -> Optional["ChatSessionResponse"]:
+        if data is None:
+            return None
+        data = dict(data)
+        if "_id" in data:
+            data["session_id"] = str(data.pop("_id"))
+        return cls(**data)
 
 
 class ChatSessionListResponse(BaseModel):
-    """
-    Schema for returning a paginated list of chat sessions.
-
-    Wraps a list of sessions with pagination metadata.
-    This is a professional pattern called an envelope response.
-    """
-
     sessions: List[ChatSessionResponse] = Field(
         default=[],
         description="List of chat sessions for the current page.",
@@ -164,10 +115,6 @@ class ChatSessionListResponse(BaseModel):
 
 
 class MessageListResponse(BaseModel):
-    """
-    Schema for returning a paginated list of messages in a session.
-    """
-
     messages: List[MessageResponse] = Field(
         default=[],
         description="List of messages for the current page.",
@@ -188,12 +135,6 @@ class MessageListResponse(BaseModel):
 
 
 class SessionSummaryResponse(BaseModel):
-    """
-    Schema for returning a session summary.
-
-    Will be populated by AI in Phase 7.
-    """
-
     session_id: str = Field(
         ...,
         description="The session being summarized.",

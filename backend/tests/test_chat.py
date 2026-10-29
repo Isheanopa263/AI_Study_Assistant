@@ -159,7 +159,7 @@ async def test_send_message_success(
     data = response.json()
     assert data["role"] == "user"
     assert data["content"] == "Explain binary search trees step by step."
-    assert data["session_id"] == session_id
+    assert "message_id" in data
 
 
 async def test_send_empty_message_fails_validation(

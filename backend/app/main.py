@@ -1,6 +1,5 @@
-from app.core.logging import setup_logging
 
-# Setup logging FIRST before anything else
+from app.core.logging import setup_logging# Setup logging FIRST before anything else
 setup_logging()
 
 import logging
@@ -15,6 +14,9 @@ from app.config import settings
 from app.core.exceptions import register_exception_handlers
 from app.core.middleware import RequestLoggingMiddleware
 from app.api.mongo_test import router as mongo_test_router
+from pymongo.errors import PyMongoError
+from app.core.exceptions import motor_exception_handler
+
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +63,7 @@ def create_application() -> FastAPI:
     application.include_router(documents_router)
     application.include_router(system_router)
     application.include_router(mongo_test_router)
+    application.add_exception_handler(PyMongoError, motor_exception_handler)
 
     logger.info(
         "Application ready. name=%s version=%s debug=%s origins=%s",

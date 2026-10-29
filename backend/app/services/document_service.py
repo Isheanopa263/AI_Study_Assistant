@@ -1,19 +1,17 @@
-# app/services/document_service.py
 """
 Service layer for document processing and business rules.
-Phase 3: No longer uses a global repository singleton.
-         The repository is injected via the constructor.
+Phase 3: The repository is injected via the constructor.
 """
 
 import hashlib
 import logging
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Tuple
 
 from fastapi import UploadFile
 
 from app.core.exceptions import DocumentProcessingException, NotFoundException
-from app.repositories.document_repository import DocumentRepository  # ← CHANGED (removed document_repository import)
+from app.repositories.document_repository import DocumentRepository
 from app.utils.file_helpers import get_file_extension, sanitize_filename
 
 logger = logging.getLogger(__name__)
@@ -31,7 +29,7 @@ CHUNK_SIZE = 64 * 1024  # 64 KB chunks
 class DocumentService:
     """Service layer for document processing and business rules."""
 
-    def __init__(self, repo: DocumentRepository):  # ← CHANGED (removed default=document_repository)
+    def __init__(self, repo: DocumentRepository):
         self.repo = repo
 
     async def process_and_save_upload(
@@ -46,7 +44,6 @@ class DocumentService:
         clean_filename = sanitize_filename(file.filename)
         extension = get_file_extension(clean_filename)
 
-        # 1. Validate Extension
         if extension not in ALLOWED_EXTENSIONS:
             logger.warning(
                 "Rejected file extension. filename=%s ext=%s",
@@ -58,7 +55,6 @@ class DocumentService:
                 detail={"allowed_extensions": sorted(ALLOWED_EXTENSIONS)},
             )
 
-        # 2. Validate MIME Type
         content_type = file.content_type or "application/octet-stream"
         if content_type not in ALLOWED_MIME_TYPES:
             logger.warning(
@@ -71,7 +67,6 @@ class DocumentService:
                 detail={"allowed_mime_types": sorted(ALLOWED_MIME_TYPES)},
             )
 
-        # 3. Stream File, Enforce Size & Compute SHA-256
         total_size = 0
         hasher = hashlib.sha256()
 
@@ -102,8 +97,9 @@ class DocumentService:
 
         checksum = hasher.hexdigest()
 
-        # Duplicate Detection
-        existing_doc = await self.repo.get_by_checksum(user_id=user_id, checksum=checksum)
+        existing_doc = await self.repo.get_by_checksum(
+            user_id=user_id, checksum=checksum
+        )
         if existing_doc:
             logger.info(
                 "Duplicate document upload detected. user_id=%s doc_id=%s checksum=%s",
@@ -113,16 +109,12 @@ class DocumentService:
             )
             return existing_doc
 
-        # 4. Create Document Record
-        # NOTE: document_id is no longer generated here.
-        # MongoDB auto-generates _id, and the repository maps it to document_id.
         document_data = {
             "user_id": user_id,
-            "filename": clean_filename,
+            "title": clean_filename,
             "file_type": extension.lstrip("."),
-            "size_bytes": total_size,
+            "file_size": total_size,
             "checksum": checksum,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
         }
 
         saved_doc = await self.repo.create(document_data)
@@ -137,17 +129,19 @@ class DocumentService:
 
     async def get_document_by_id(self, document_id: str, user_id: str) -> dict:
         """Retrieve a specific document verifying user ownership."""
-        doc = await self.repo.get_by_id(document_id)
-        if not doc or doc.get("user_id") != user_id:
+        doc = await self.repo.get_by_id(document_id, user_id)
+        if not doc:
             raise NotFoundException(resource="Document", resource_id=document_id)
         return doc
 
-    async def list_user_documents(self, user_id: str) -> List[dict]:
-        """Fetch all documents belonging to a user."""
-        return await self.repo.get_by_user_id(user_id)
+    async def list_user_documents(
+        self, user_id: str, skip: int = 0, limit: int = 20
+    ) -> Tuple[List[dict], int]:
+        """Fetch all documents belonging to a user. Returns (docs, total)."""
+        return await self.repo.list_by_user(user_id, skip=skip, limit=limit)
 
     async def delete_document(self, document_id: str, user_id: str) -> None:
         """Delete a document verifying ownership."""
         await self.get_document_by_id(document_id, user_id)
-        await self.repo.delete(document_id)
+        await self.repo.delete(document_id, user_id)
         logger.info("Document deleted. doc_id=%s user_id=%s", document_id, user_id)

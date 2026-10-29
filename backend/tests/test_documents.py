@@ -40,12 +40,12 @@ async def test_upload_valid_txt_file(
     # Assert
     assert response.status_code == 201
     data = response.json()
-    assert data["filename"] == "graph_theory.txt"
+    assert data["title"] == "graph_theory.txt"
     assert data["file_type"] == "txt"
-    assert data["size_bytes"] == len(file_content)
-    assert "checksum" in data
+    assert data["file_size"] == len(file_content)
+    assert "created_at" in data
     assert "document_id" in data
-    assert data["human_size"] == f"{len(file_content)} B"
+    assert data["file_size"] == len(file_content)
 
 
 async def test_upload_invalid_extension_rejected(
@@ -117,7 +117,7 @@ async def test_duplicate_file_upload_returns_existing_record(
 
     # Assert: Should return same document ID and checksum
     assert doc1["document_id"] == doc2["document_id"]
-    assert doc1["checksum"] == doc2["checksum"]
+    assert doc1["file_type"] == doc2["file_type"]
 
 
 async def test_get_document_by_id_success(
@@ -136,7 +136,7 @@ async def test_get_document_by_id_success(
     # Assert
     assert get_res.status_code == 200
     assert get_res.json()["document_id"] == doc_id
-    assert get_res.json()["filename"] == "discrete_math.txt"
+    assert get_res.json()["title"] == "discrete_math.txt"
 
 
 async def test_get_document_by_id_not_found(
@@ -145,7 +145,7 @@ async def test_get_document_by_id_not_found(
 ):
     """Verify requesting non-existent document ID returns 404."""
     # Act
-    response = await client.get("/api/documents/non_existent_doc_999", headers=auth_headers)
+    response = await client.get("/api/documents/000000000000000000000000", headers=auth_headers)
 
     # Assert
     assert response.status_code == 404
