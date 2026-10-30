@@ -96,20 +96,24 @@ class Settings(BaseSettings):
         description="Name of the MongoDB database",
     )
 
-    # --------------------------------------------------------------------------
-    # AI PROVIDER
-    # OpenAI/Gemini integration will be added in Phase 7.
-    # --------------------------------------------------------------------------
-
-    OPENAI_API_KEY: str = Field(
-        default="",
-        description="OpenAI API key. Required for AI features in Phase 7.",
-    )
-    OPENAI_MODEL: str = Field(
-        default="gpt-4o-mini",
-        description="OpenAI model to use for chat completions.",
-    )
-
+    # ── Google Gemini (Phase 4) ──
+    GEMINI_API_KEY: str = Field(
+            default="",
+            description="Your Google Gemini API key from aistudio.google.com",
+        )
+    GEMINI_MODEL: str = Field(
+            default="gemini-2.5-flash",
+            description="The Gemini model to use. Check free-tier availability.",
+        )
+    GEMINI_MAX_TOKENS: int = Field(
+            default=1000,
+            description="Maximum tokens in the AI response.",
+        )
+    GEMINI_TEMPERATURE: float = Field(
+            default=0.3,
+            description="Creativity level: 0.0 (factual) to 2.0 (chaotic).",
+        )
+    
     # --------------------------------------------------------------------------
     # CORS
     # --------------------------------------------------------------------------
