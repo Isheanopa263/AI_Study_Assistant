@@ -7,7 +7,7 @@ from typing import Dict
 import pytest
 from httpx import AsyncClient
 
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, patch, MagicMock
 
 
 # ── AUTH TESTS ──
@@ -260,3 +260,41 @@ async def test_rate_limiter_blocks_eleventh_message(
         headers=auth_headers,
     )
     assert res.status_code == 429
+    
+
+
+async def test_stream_message_success(
+    client: AsyncClient, auth_headers: Dict[str, str]
+):
+    """Verify streaming endpoint returns SSE events."""
+    # Create session
+    create_resp = await client.post(
+        "/api/chat/sessions",
+        json={"title": "Stream Test"},
+        headers=auth_headers,
+    )
+    session_id = create_resp.json()["session_id"]
+
+    # Create a mock async generator
+    async def mock_stream(*args, **kwargs):
+        for chunk in ["A hash ", "table is ", "a data structure."]:
+            yield chunk
+
+    with patch(
+        "app.api.chat.AIService.chat_stream",
+        side_effect=mock_stream,
+    ):
+        response = await client.post(
+            f"/api/chat/sessions/{session_id}/stream",
+            json={"content": "What is a hash table?"},
+            headers=auth_headers,
+        )
+
+    assert response.status_code == 200
+    assert "text/event-stream" in response.headers["content-type"]
+
+    body = response.text
+    assert 'data: {"chunk": "A hash "}' in body
+    assert 'data: {"chunk": "table is "}' in body
+    assert 'data: {"chunk": "a data structure."}' in body
+    assert "data: [DONE]" in body

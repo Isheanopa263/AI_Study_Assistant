@@ -2,16 +2,11 @@
 """
 AI service layer — the single point of contact with the Google Gemini API.
 
-Provider-independent design:
-  - MongoDB stores messages as {"role": "user"|"assistant", "content": "..."}
-  - This service translates to Gemini's {"role": "user"|"model", "parts": [...]}
-  - If you switch providers later, only this file changes.
-
-Phase 4, Lesson 2: Added few-shot example support.
+Phase 4, Lesson 4: Added streaming support via chat_stream().
 """
 
 import logging
-from typing import List, Dict
+from typing import List, Dict, AsyncGenerator
 
 from google import genai
 from google.genai import types
@@ -43,15 +38,7 @@ class AIService:
     def _translate_messages(
         messages: List[Dict[str, str]],
     ) -> tuple[str | None, list[types.Content]]:
-        """
-        Convert internal message format to Gemini format.
-
-        Internal (MongoDB):  {"role": "user"|"assistant", "content": "..."}
-        Gemini:              {"role": "user"|"model", "parts": [{"text": "..."}]}
-
-        Returns:
-            A tuple of (system_instruction, gemini_contents).
-        """
+        """Convert internal message format to Gemini format."""
         system_instruction = None
         gemini_contents = []
 
@@ -78,6 +65,19 @@ class AIService:
 
         return system_instruction, gemini_contents
 
+    def _build_config(
+        self,
+        system_instruction: str | None,
+        temperature: float | None,
+        max_tokens: int | None,
+    ) -> types.GenerateContentConfig:
+        """Build the generation config from parameters."""
+        return types.GenerateContentConfig(
+            system_instruction=system_instruction,
+            temperature=temperature if temperature is not None else self.temperature,
+            max_output_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+        )
+
     async def chat(
         self,
         messages: List[Dict[str, str]],
@@ -85,35 +85,14 @@ class AIService:
         max_tokens: int | None = None,
         few_shot_examples: List[Dict[str, str]] | None = None,
     ) -> str:
-        """
-        Send messages to the LLM and return the response text.
-
-        Args:
-            messages: List of {"role": "system"|"user"|"assistant", "content": "..."}
-            temperature: Override default temperature.
-            max_tokens: Override default max_tokens.
-            few_shot_examples: Optional list of example Q&A pairs to prepend
-                               after the system instruction. These teach the
-                               model the desired response style by example.
-
-        Returns:
-            The model's response as a plain string.
-
-        Raises:
-            AIServiceException: If the API call fails.
-        """
+        """Send messages to the LLM and return the full response text."""
         system_instruction, contents = self._translate_messages(messages)
 
-        # Insert few-shot examples at the beginning of the conversation
         if few_shot_examples:
             _, example_contents = self._translate_messages(few_shot_examples)
             contents = example_contents + contents
 
-        config = types.GenerateContentConfig(
-            system_instruction=system_instruction,
-            temperature=temperature if temperature is not None else self.temperature,
-            max_output_tokens=max_tokens if max_tokens is not None else self.max_tokens,
-        )
+        config = self._build_config(system_instruction, temperature, max_tokens)
 
         try:
             response = await self.client.aio.models.generate_content(
@@ -169,4 +148,60 @@ class AIService:
             logger.error("Unexpected AI service error: %s", e)
             raise AIServiceException(
                 message="An unexpected error occurred while contacting the AI service."
+            )
+
+    async def chat_stream(
+        self,
+        messages: List[Dict[str, str]],
+        temperature: float | None = None,
+        max_tokens: int | None = None,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Stream messages to the LLM, yielding text chunks as they arrive.
+
+        This is an async generator — it yields partial text strings.
+        The caller is responsible for accumulating the full response.
+
+        Yields:
+            Text chunks (e.g., "A ", "binary ", "search ", "tree ")
+
+        Raises:
+            AIServiceException: If the API call fails.
+        """
+        system_instruction, contents = self._translate_messages(messages)
+        config = self._build_config(system_instruction, temperature, max_tokens)
+
+        try:
+            response_stream = await self.client.aio.models.generate_content_stream(
+                model=self.model,
+                contents=contents,
+                config=config,
+            )
+
+            async for chunk in response_stream:
+                if chunk.text:
+                    yield chunk.text
+
+        except ClientError as e:
+            error_msg = str(e)
+            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
+                logger.error("Gemini rate limit exceeded during stream.")
+                raise AIServiceException(
+                    message="AI service quota exceeded. Please try again later."
+                )
+            logger.error("Gemini client error during stream: %s", e)
+            raise AIServiceException(
+                message=f"AI service error: {e}"
+            )
+
+        except ServerError as e:
+            logger.error("Gemini server error during stream: %s", e)
+            raise AIServiceException(
+                message="AI service is temporarily unavailable."
+            )
+
+        except Exception as e:
+            logger.error("Unexpected error during stream: %s", e)
+            raise AIServiceException(
+                message="An unexpected error occurred during streaming."
             )

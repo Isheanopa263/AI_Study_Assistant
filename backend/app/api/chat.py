@@ -1,16 +1,18 @@
 # backend/app/api/chat.py
 """
 Chat session and message endpoints.
-Phase 4, Lesson 3: AI-powered responses integrated into send_message.
+Phase 4, Lesson 4: Added SSE streaming endpoint.
 """
 
+import json
 import logging
 
 from fastapi import APIRouter, Depends
+from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
 from app.core.dependencies import get_chat_repo, get_current_user, get_pagination
-from app.core.exceptions import NotFoundException
+from app.core.exceptions import AIServiceException, NotFoundException
 from app.core.rate_limiter import check_rate_limit
 from app.repositories.chat_repository import ChatRepository
 from app.schemas.chat import (
@@ -28,6 +30,37 @@ from app.services.prompts import TUTOR_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
+
+
+# ── HELPER ──
+
+
+async def _build_ai_messages(
+    repo: ChatRepository,
+    session_id: str,
+    new_content: str,
+) -> list[dict]:
+    """
+    Load conversation history and build the full message list for the AI.
+
+    Returns:
+        List of {"role": ..., "content": ...} dicts ready for AIService.
+    """
+    settings = get_settings()
+    history = await repo.get_messages(
+        session_id=session_id,
+        skip=0,
+        limit=settings.GEMINI_MAX_HISTORY_MESSAGES,
+    )
+
+    ai_messages = [{"role": "system", "content": TUTOR_SYSTEM_PROMPT}]
+    for msg in history:
+        ai_messages.append({
+            "role": msg.get("role", "user"),
+            "content": msg.get("content", ""),
+        })
+
+    return ai_messages
 
 
 # ── SESSIONS ──
@@ -109,7 +142,7 @@ async def delete_session(
     logger.info("Session deleted: id=%s", session_id)
 
 
-# ── MESSAGES ──
+# ── MESSAGES (non-streaming) ──
 
 
 @router.post(
@@ -126,25 +159,13 @@ async def send_message(
     _: bool = Depends(check_rate_limit),
 ):
     """
-    Send a message in a chat session and get an AI-powered response.
-
-    Flow:
-      1. Verify session exists
-      2. Save student's message to MongoDB
-      3. Load recent conversation history
-      4. Send history + new message to Gemini
-      5. Save AI's response to MongoDB
-      6. Return AI's response
-
-    If the AI is unavailable, returns the student's saved message
-    so it isn't lost (graceful degradation).
+    Send a message and get a complete AI response (non-streaming).
+    Use /stream for real-time token-by-token responses.
     """
-    # 1. Verify session exists
     session = await repo.get_session(session_id)
     if not session:
         raise NotFoundException(resource="ChatSession", resource_id=session_id)
 
-    # 2. Save student's message
     user_message = await repo.add_message(
         session_id=session_id,
         role="user",
@@ -152,50 +173,127 @@ async def send_message(
     )
     logger.info("User message saved: session=%s", session_id)
 
-    # 3. Load recent conversation history
-    settings = get_settings()
-    history = await repo.get_messages(
-        session_id=session_id,
-        skip=0,
-        limit=settings.GEMINI_MAX_HISTORY_MESSAGES,
-    )
+    ai_messages = await _build_ai_messages(repo, session_id, message_in.content)
 
-    # Build the messages list for the AI
-    # Extract only role and content (AIService doesn't need message_id, etc.)
-    ai_messages = [
-        {"role": "system", "content": TUTOR_SYSTEM_PROMPT},
-    ]
-    for msg in history:
-        ai_messages.append({
-            "role": msg.get("role", "user"),
-            "content": msg.get("content", ""),
-        })
-
-    # 4. Call the AI
     try:
         ai = AIService()
         ai_response_text = await ai.chat(ai_messages)
 
-        # 5. Save AI's response to MongoDB
         ai_message = await repo.add_message(
             session_id=session_id,
             role="assistant",
             content=ai_response_text,
         )
         logger.info("AI response saved: session=%s", session_id)
-
-        # 6. Return AI's response
         return MessageResponse(**ai_message)
 
     except Exception as e:
-        # Graceful degradation: AI is down, but student's message is saved.
-        # Return the student's message so the frontend knows it was received.
         logger.warning(
             "AI unavailable, returning user message. session=%s error=%s",
-            session_id,
-            e,
+            session_id, e,
         )
         return MessageResponse(**user_message)
+
+
+# ── MESSAGES (streaming via SSE) ──
+
+
+@router.post(
+    "/sessions/{session_id}/stream",
+    status_code=200,
+)
+async def stream_message(
+    session_id: str,
+    message_in: MessageCreate,
+    user: dict = Depends(get_current_user),
+    repo: ChatRepository = Depends(get_chat_repo),
+    _: bool = Depends(check_rate_limit),
+):
+    """
+    Send a message and receive the AI response as a stream of SSE events.
+
+    Each event is formatted as:
+        data: {"chunk": "partial text"}
+
+    The stream ends with:
+        data: [DONE]
+
+    The complete AI response is saved to MongoDB after streaming finishes.
+    """
+    # 1. Verify session exists
+    session = await repo.get_session(session_id)
+    if not session:
+        raise NotFoundException(resource="ChatSession", resource_id=session_id)
+
+    # 2. Save student's message
+    await repo.add_message(
+        session_id=session_id,
+        role="user",
+        content=message_in.content,
+    )
+    logger.info("User message saved (stream): session=%s", session_id)
+
+    # 3. Build AI prompt
+    ai_messages = await _build_ai_messages(repo, session_id, message_in.content)
+
+    # 4. Create the SSE generator
+    async def event_generator():
+        """Yields SSE-formatted chunks and saves the full response at the end."""
+        full_response_parts = []
+
+        try:
+            ai = AIService()
+            async for chunk_text in ai.chat_stream(ai_messages):
+                full_response_parts.append(chunk_text)
+
+                # Format as SSE event
+                event_data = json.dumps({"chunk": chunk_text})
+                yield f"data: {event_data}\n\n"
+
+            # Signal end of stream
+            yield "data: [DONE]\n\n"
+
+            # Save complete response to MongoDB
+            complete_text = "".join(full_response_parts)
+            if complete_text:
+                await repo.add_message(
+                    session_id=session_id,
+                    role="assistant",
+                    content=complete_text,
+                )
+                logger.info(
+                    "AI stream response saved: session=%s length=%d",
+                    session_id, len(complete_text),
+                )
+
+        except AIServiceException as e:
+            # Send error to client as an SSE event
+            error_data = json.dumps({"error": e.message})
+            yield f"data: {error_data}\n\n"
+            yield "data: [DONE]\n\n"
+            logger.warning(
+                "AI stream error: session=%s error=%s", session_id, e.message
+            )
+
+        except Exception as e:
+            error_data = json.dumps({"error": "An unexpected error occurred."})
+            yield f"data: {error_data}\n\n"
+            yield "data: [DONE]\n\n"
+            logger.error("Unexpected stream error: session=%s error=%s", session_id, e)
+
+    # 5. Return streaming response
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",  # Disable nginx buffering if applicable
+        },
+    )
+
+
+# ── MESSAGES (list) ──
 
 
 @router.get(
