@@ -7,6 +7,8 @@ from typing import Dict
 import pytest
 from httpx import AsyncClient
 
+from unittest.mock import AsyncMock, patch
+
 
 # ── AUTH TESTS ──
 
@@ -137,10 +139,11 @@ async def test_full_session_concurrency(
 # ── MESSAGES ──
 
 
+
 async def test_send_message_success(
     client: AsyncClient, auth_headers: Dict[str, str]
 ):
-    """Verify sending a valid message returns 201."""
+    """Verify sending a valid message returns 201 with an AI response."""
     # Create a session first
     create_resp = await client.post(
         "/api/chat/sessions",
@@ -149,18 +152,26 @@ async def test_send_message_success(
     )
     session_id = create_resp.json()["session_id"]
 
-    payload = {"content": "Explain binary search trees step by step."}
-    response = await client.post(
-        f"/api/chat/sessions/{session_id}/messages",
-        json=payload,
-        headers=auth_headers,
-    )
+    # Mock the AI service to avoid real API calls in tests
+    mock_ai_response = "A binary search tree is a sorted binary tree where each node's left children are smaller and right children are larger."
+
+    with patch(
+        "app.api.chat.AIService.chat",
+        new_callable=AsyncMock,
+        return_value=mock_ai_response,
+    ):
+        payload = {"content": "Explain binary search trees step by step."}
+        response = await client.post(
+            f"/api/chat/sessions/{session_id}/messages",
+            json=payload,
+            headers=auth_headers,
+        )
+
     assert response.status_code == 201
     data = response.json()
-    assert data["role"] == "user"
-    assert data["content"] == "Explain binary search trees step by step."
+    assert data["role"] == "assistant"
+    assert data["content"] == mock_ai_response
     assert "message_id" in data
-
 
 async def test_send_empty_message_fails_validation(
     client: AsyncClient, auth_headers: Dict[str, str]

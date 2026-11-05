@@ -1,12 +1,14 @@
+# backend/app/api/chat.py
 """
 Chat session and message endpoints.
-Phase 3: Uses MongoDB via ChatRepository.
+Phase 4, Lesson 3: AI-powered responses integrated into send_message.
 """
 
 import logging
 
 from fastapi import APIRouter, Depends
 
+from app.config import get_settings
 from app.core.dependencies import get_chat_repo, get_current_user, get_pagination
 from app.core.exceptions import NotFoundException
 from app.core.rate_limiter import check_rate_limit
@@ -21,6 +23,8 @@ from app.schemas.chat import (
     PaginationParams,
     SessionSummaryResponse,
 )
+from app.services.ai_service import AIService
+from app.services.prompts import TUTOR_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
@@ -121,19 +125,77 @@ async def send_message(
     repo: ChatRepository = Depends(get_chat_repo),
     _: bool = Depends(check_rate_limit),
 ):
-    """Send a message in a chat session."""
+    """
+    Send a message in a chat session and get an AI-powered response.
+
+    Flow:
+      1. Verify session exists
+      2. Save student's message to MongoDB
+      3. Load recent conversation history
+      4. Send history + new message to Gemini
+      5. Save AI's response to MongoDB
+      6. Return AI's response
+
+    If the AI is unavailable, returns the student's saved message
+    so it isn't lost (graceful degradation).
+    """
+    # 1. Verify session exists
     session = await repo.get_session(session_id)
     if not session:
         raise NotFoundException(resource="ChatSession", resource_id=session_id)
 
-    message = await repo.add_message(
+    # 2. Save student's message
+    user_message = await repo.add_message(
         session_id=session_id,
         role="user",
         content=message_in.content,
     )
+    logger.info("User message saved: session=%s", session_id)
 
-    logger.info("Message sent: session=%s", session_id)
-    return MessageResponse(**message)
+    # 3. Load recent conversation history
+    settings = get_settings()
+    history = await repo.get_messages(
+        session_id=session_id,
+        skip=0,
+        limit=settings.GEMINI_MAX_HISTORY_MESSAGES,
+    )
+
+    # Build the messages list for the AI
+    # Extract only role and content (AIService doesn't need message_id, etc.)
+    ai_messages = [
+        {"role": "system", "content": TUTOR_SYSTEM_PROMPT},
+    ]
+    for msg in history:
+        ai_messages.append({
+            "role": msg.get("role", "user"),
+            "content": msg.get("content", ""),
+        })
+
+    # 4. Call the AI
+    try:
+        ai = AIService()
+        ai_response_text = await ai.chat(ai_messages)
+
+        # 5. Save AI's response to MongoDB
+        ai_message = await repo.add_message(
+            session_id=session_id,
+            role="assistant",
+            content=ai_response_text,
+        )
+        logger.info("AI response saved: session=%s", session_id)
+
+        # 6. Return AI's response
+        return MessageResponse(**ai_message)
+
+    except Exception as e:
+        # Graceful degradation: AI is down, but student's message is saved.
+        # Return the student's message so the frontend knows it was received.
+        logger.warning(
+            "AI unavailable, returning user message. session=%s error=%s",
+            session_id,
+            e,
+        )
+        return MessageResponse(**user_message)
 
 
 @router.get(

@@ -7,7 +7,7 @@ Provider-independent design:
   - This service translates to Gemini's {"role": "user"|"model", "parts": [...]}
   - If you switch providers later, only this file changes.
 
-Phase 4, Lesson 1: Basic chat completions.
+Phase 4, Lesson 2: Added few-shot example support.
 """
 
 import logging
@@ -49,9 +49,6 @@ class AIService:
         Internal (MongoDB):  {"role": "user"|"assistant", "content": "..."}
         Gemini:              {"role": "user"|"model", "parts": [{"text": "..."}]}
 
-        The system prompt is extracted separately because Gemini handles it
-        as a config parameter, not as a message in the conversation list.
-
         Returns:
             A tuple of (system_instruction, gemini_contents).
         """
@@ -63,10 +60,8 @@ class AIService:
             content = msg.get("content", "")
 
             if role == "system":
-                # Gemini uses system_instruction in config, not in contents
                 system_instruction = content
             elif role == "assistant":
-                # Gemini calls the AI role "model", not "assistant"
                 gemini_contents.append(
                     types.Content(
                         role="model",
@@ -74,7 +69,6 @@ class AIService:
                     )
                 )
             else:
-                # "user" role maps directly
                 gemini_contents.append(
                     types.Content(
                         role="user",
@@ -89,23 +83,31 @@ class AIService:
         messages: List[Dict[str, str]],
         temperature: float | None = None,
         max_tokens: int | None = None,
+        few_shot_examples: List[Dict[str, str]] | None = None,
     ) -> str:
         """
         Send messages to the LLM and return the response text.
 
         Args:
             messages: List of {"role": "system"|"user"|"assistant", "content": "..."}
-                      Uses YOUR internal format — translation happens internally.
-            temperature: Override default temperature for this call.
-            max_tokens: Override default max_tokens for this call.
+            temperature: Override default temperature.
+            max_tokens: Override default max_tokens.
+            few_shot_examples: Optional list of example Q&A pairs to prepend
+                               after the system instruction. These teach the
+                               model the desired response style by example.
 
         Returns:
             The model's response as a plain string.
 
         Raises:
-            AIServiceException: If the API call fails for any reason.
+            AIServiceException: If the API call fails.
         """
         system_instruction, contents = self._translate_messages(messages)
+
+        # Insert few-shot examples at the beginning of the conversation
+        if few_shot_examples:
+            _, example_contents = self._translate_messages(few_shot_examples)
+            contents = example_contents + contents
 
         config = types.GenerateContentConfig(
             system_instruction=system_instruction,
@@ -135,7 +137,6 @@ class AIService:
             return content_text
 
         except ClientError as e:
-            # 4xx errors: bad API key, invalid request, quota exceeded
             error_msg = str(e)
             if "API_KEY_INVALID" in error_msg or "401" in error_msg:
                 logger.error("Gemini API key is invalid or expired.")
@@ -153,7 +154,6 @@ class AIService:
             )
 
         except ServerError as e:
-            # 5xx errors: Google's servers are having issues
             logger.error("Gemini server error: %s", e)
             raise AIServiceException(
                 message="AI service is temporarily unavailable. Please try again."

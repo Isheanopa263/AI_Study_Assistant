@@ -113,6 +113,10 @@ class Settings(BaseSettings):
             default=0.3,
             description="Creativity level: 0.0 (factual) to 2.0 (chaotic).",
         )
+    GEMINI_MAX_HISTORY_MESSAGES: int = Field(
+        default=20,
+        description="Number of recent messages to include as context for the AI.",
+    )
     
     # --------------------------------------------------------------------------
     # CORS
