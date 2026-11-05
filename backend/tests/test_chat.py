@@ -226,14 +226,18 @@ async def test_delete_chat_session_returns_204(
 # ── RATE LIMITING ──
 
 
+@patch("app.services.ai_service.AIService.chat", new_callable=AsyncMock, return_value="Test response")
 async def test_rate_limiter_blocks_eleventh_message(
-    client: AsyncClient, auth_headers: Dict[str, str]
+    mock_chat, client: AsyncClient, auth_headers: Dict[str, str]
 ):
     """
     Verify sliding window rate limiting:
     - 10 rapid messages within 60 seconds are permitted (201 Created).
     - The 11th message is blocked with 429 Too Many Requests.
     """
+    # Mock AI to return instantly — we're testing the rate limiter, not Gemini
+    mock_chat = AsyncMock(return_value="Test response")
+
     # Create a session first
     create_resp = await client.post(
         "/api/chat/sessions",
@@ -260,8 +264,6 @@ async def test_rate_limiter_blocks_eleventh_message(
         headers=auth_headers,
     )
     assert res.status_code == 429
-    
-
 
 async def test_stream_message_success(
     client: AsyncClient, auth_headers: Dict[str, str]

@@ -26,6 +26,7 @@ from app.schemas.chat import (
     SessionSummaryResponse,
 )
 from app.services.ai_service import AIService
+from app.services.context_manager import ContextManager
 from app.services.prompts import TUTOR_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
@@ -38,30 +39,38 @@ router = APIRouter(prefix="/api/chat", tags=["Chat"])
 async def _build_ai_messages(
     repo: ChatRepository,
     session_id: str,
-    new_content: str,
 ) -> list[dict]:
     """
     Load conversation history and build the full message list for the AI.
+    Uses ContextManager for token-aware history selection.
 
     Returns:
         List of {"role": ..., "content": ...} dicts ready for AIService.
     """
-    settings = get_settings()
     history = await repo.get_messages(
         session_id=session_id,
         skip=0,
-        limit=settings.GEMINI_MAX_HISTORY_MESSAGES,
+        limit=100,  # Load more; context manager will trim
     )
 
-    ai_messages = [{"role": "system", "content": TUTOR_SYSTEM_PROMPT}]
-    for msg in history:
-        ai_messages.append({
-            "role": msg.get("role", "user"),
-            "content": msg.get("content", ""),
-        })
+    # Extract only role and content
+    raw_messages = [
+        {"role": msg.get("role", "user"), "content": msg.get("content", "")}
+        for msg in history
+    ]
+
+    # Use context manager to fit within token budget
+    context_manager = ContextManager()
+    selected_messages, enhanced_prompt = await context_manager.build_context(
+        history=raw_messages,
+        system_prompt=TUTOR_SYSTEM_PROMPT,
+    )
+
+    # Prepend system prompt (possibly enhanced with summary)
+    ai_messages = [{"role": "system", "content": enhanced_prompt}]
+    ai_messages.extend(selected_messages)
 
     return ai_messages
-
 
 # ── SESSIONS ──
 
@@ -173,7 +182,7 @@ async def send_message(
     )
     logger.info("User message saved: session=%s", session_id)
 
-    ai_messages = await _build_ai_messages(repo, session_id, message_in.content)
+    ai_messages = await _build_ai_messages(repo, session_id)
 
     try:
         ai = AIService()
@@ -234,7 +243,7 @@ async def stream_message(
     logger.info("User message saved (stream): session=%s", session_id)
 
     # 3. Build AI prompt
-    ai_messages = await _build_ai_messages(repo, session_id, message_in.content)
+    ai_messages = await _build_ai_messages(repo, session_id)
 
     # 4. Create the SSE generator
     async def event_generator():

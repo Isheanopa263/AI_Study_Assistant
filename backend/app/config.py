@@ -117,6 +117,14 @@ class Settings(BaseSettings):
         default=20,
         description="Number of recent messages to include as context for the AI.",
     )
+    GEMINI_MAX_CONTEXT_TOKENS: int = Field(
+        default=8000,
+        description="Maximum tokens for conversation history in each AI request.",
+    )
+    GEMINI_SUMMARY_THRESHOLD: int = Field(
+        default=15000,
+        description="Token count that triggers conversation summarization.",
+    )
     
     # --------------------------------------------------------------------------
     # CORS
