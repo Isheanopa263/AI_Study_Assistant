@@ -1,180 +1,148 @@
-# backend/app/services/ai_service.py
 """
-AI service layer — the single point of contact with the Google Gemini API.
-
-Phase 4, Lesson 4: Added streaming support via chat_stream().
+AI Service layer interacting with Google Gemini API via google-genai SDK.
+Handles text generation, streaming, token counting, and error translation.
 """
 
 import logging
-from typing import List, Dict, AsyncGenerator
-
+from typing import Any, AsyncGenerator, Dict, List, Optional, Union
 from google import genai
 from google.genai import types
 from google.genai.errors import APIError, ClientError, ServerError
 
-from app.config import get_settings
+from app.config import settings
 from app.core.exceptions import AIServiceException
 
 logger = logging.getLogger(__name__)
 
 
 class AIService:
-    """Wraps the Google Gemini client for chat completions."""
+    """Service wrapper for Google Gemini client operations."""
 
     def __init__(self):
-        settings = get_settings()
+        self.api_key = settings.GEMINI_API_KEY
+        self.model_name = settings.GEMINI_MODEL or "gemini-3.5-flash"
+        self._client: Optional[genai.Client] = None
 
-        if not settings.GEMINI_API_KEY:
-            logger.warning(
-                "GEMINI_API_KEY is not set. AI features will not work."
-            )
-
-        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
-        self.model = settings.GEMINI_MODEL
-        self.max_tokens = settings.GEMINI_MAX_TOKENS
-        self.temperature = settings.GEMINI_TEMPERATURE
-
-    @staticmethod
-    def _translate_messages(
-        messages: List[Dict[str, str]],
-    ) -> tuple[str | None, list[types.Content]]:
-        """Convert internal message format to Gemini format."""
-        system_instruction = None
-        gemini_contents = []
-
-        for msg in messages:
-            role = msg.get("role", "user")
-            content = msg.get("content", "")
-
-            if role == "system":
-                system_instruction = content
-            elif role == "assistant":
-                gemini_contents.append(
-                    types.Content(
-                        role="model",
-                        parts=[types.Part(text=content)],
-                    )
-                )
-            else:
-                gemini_contents.append(
-                    types.Content(
-                        role="user",
-                        parts=[types.Part(text=content)],
-                    )
-                )
-
-        return system_instruction, gemini_contents
+    @property
+    def client(self) -> genai.Client:
+        """Lazy initialization of google-genai client."""
+        if self._client is None:
+            if not self.api_key:
+                logger.warning("GEMINI_API_KEY is empty. AI operations will fail.")
+            self._client = genai.Client(api_key=self.api_key)
+        return self._client
 
     def _build_config(
         self,
-        system_instruction: str | None,
-        temperature: float | None,
-        max_tokens: int | None,
+        system_instruction: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_output_tokens: Optional[int] = None,
     ) -> types.GenerateContentConfig:
-        """Build the generation config from parameters."""
+        """Construct GenerateContentConfig with optional overrides."""
         return types.GenerateContentConfig(
             system_instruction=system_instruction,
-            temperature=temperature if temperature is not None else self.temperature,
-            max_output_tokens=max_tokens if max_tokens is not None else self.max_tokens,
+            temperature=temperature if temperature is not None else settings.GEMINI_TEMPERATURE,
+            max_output_tokens=max_output_tokens or settings.GEMINI_MAX_TOKENS,
         )
+
+    def _translate_messages(
+        self, messages: List[Union[Dict[str, Any], types.Content]]
+    ) -> List[types.Content]:
+        """Convert list of internal message dicts or Content objects into Gemini Content format."""
+        formatted: List[types.Content] = []
+        for msg in messages:
+            if isinstance(msg, types.Content):
+                formatted.append(msg)
+            elif isinstance(msg, dict):
+                role = msg.get("role", "user")
+                content = msg.get("content", "")
+                gemini_role = "model" if role == "assistant" else "user"
+                formatted.append(
+                    types.Content(
+                        role=gemini_role,
+                        parts=[types.Part(text=content)]
+                    )
+                )
+        return formatted
 
     async def chat(
         self,
-        messages: List[Dict[str, str]],
-        temperature: float | None = None,
-        max_tokens: int | None = None,
-        few_shot_examples: List[Dict[str, str]] | None = None,
+        messages: List[Union[Dict[str, Any], types.Content]],
+        system_instruction: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
-        """Send messages to the LLM and return the full response text."""
-        system_instruction, contents = self._translate_messages(messages)
-
-        if few_shot_examples:
-            _, example_contents = self._translate_messages(few_shot_examples)
-            contents = example_contents + contents
-
-        config = self._build_config(system_instruction, temperature, max_tokens)
-
+        """Send chat messages to Gemini and return text response."""
         try:
+            formatted_contents = self._translate_messages(messages)
+            config = self._build_config(
+                system_instruction=system_instruction,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+
             response = await self.client.aio.models.generate_content(
-                model=self.model,
-                contents=contents,
+                model=self.model_name,
+                contents=formatted_contents,
                 config=config,
             )
 
-            content_text = response.text or ""
-            usage = response.usage_metadata
+            if not response.text:
+                raise AIServiceException("Gemini returned empty response text.")
 
-            logger.info(
-                "AI response generated. model=%s prompt_tokens=%s "
-                "completion_tokens=%s total_tokens=%s",
-                self.model,
-                usage.prompt_token_count if usage else "?",
-                usage.candidates_token_count if usage else "?",
-                usage.total_token_count if usage else "?",
-            )
-
-            return content_text
-
-        except ClientError as e:
-            error_msg = str(e)
-            if "API_KEY_INVALID" in error_msg or "401" in error_msg:
-                logger.error("Gemini API key is invalid or expired.")
-                raise AIServiceException(
-                    message="AI service authentication failed. Check your API key."
+            if hasattr(response, "usage_metadata") and response.usage_metadata:
+                usage = response.usage_metadata
+                logger.info(
+                    f"AI response generated. model={self.model_name} "
+                    f"prompt_tokens={getattr(usage, 'prompt_token_count', 0)} "
+                    f"completion_tokens={getattr(usage, 'candidates_token_count', 0)} "
+                    f"total_tokens={getattr(usage, 'total_token_count', 0)}"
                 )
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                logger.error("Gemini rate limit or quota exceeded.")
-                raise AIServiceException(
-                    message="AI service quota exceeded. Please try again later."
-                )
-            logger.error("Gemini client error: %s", e)
-            raise AIServiceException(
-                message=f"AI service request error: {e}"
-            )
 
-        except ServerError as e:
-            logger.error("Gemini server error: %s", e)
-            raise AIServiceException(
-                message="AI service is temporarily unavailable. Please try again."
-            )
+            return response.text
 
-        except APIError as e:
-            logger.error("Gemini API error: %s", e)
-            raise AIServiceException(
-                message=f"AI service error: {e}"
-            )
+        except ClientError as exc:
+            logger.error(f"Gemini client error (4xx): {exc}")
+            if exc.code == 401 or "API_KEY_INVALID" in str(exc):
+                raise AIServiceException("Invalid Gemini API Key. Please check configuration.")
+            elif exc.code == 429 or "RESOURCE_EXHAUSTED" in str(exc):
+                raise AIServiceException("AI service quota exceeded. Please try again later.")
+            raise AIServiceException(f"AI client error: {exc.message if hasattr(exc, 'message') else str(exc)}")
 
-        except Exception as e:
-            logger.error("Unexpected AI service error: %s", e)
-            raise AIServiceException(
-                message="An unexpected error occurred while contacting the AI service."
-            )
+        except ServerError as exc:
+            logger.error(f"Gemini server error: {exc}")
+            raise AIServiceException("AI service is temporarily unavailable. Please try again.")
+
+        except APIError as exc:
+            logger.error(f"Gemini API error: {exc}")
+            raise AIServiceException(f"AI service error: {str(exc)}")
+
+        except AIServiceException:
+            raise
+
+        except Exception as exc:
+            logger.error(f"Unexpected AI error: {exc}", exc_info=True)
+            raise AIServiceException(f"AI service error: {str(exc)}")
 
     async def chat_stream(
         self,
-        messages: List[Dict[str, str]],
-        temperature: float | None = None,
-        max_tokens: int | None = None,
+        messages: List[Union[Dict[str, Any], types.Content]],
+        system_instruction: Optional[str] = None,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[str, None]:
-        """
-        Stream messages to the LLM, yielding text chunks as they arrive.
-
-        This is an async generator — it yields partial text strings.
-        The caller is responsible for accumulating the full response.
-
-        Yields:
-            Text chunks (e.g., "A ", "binary ", "search ", "tree ")
-
-        Raises:
-            AIServiceException: If the API call fails.
-        """
-        system_instruction, contents = self._translate_messages(messages)
-        config = self._build_config(system_instruction, temperature, max_tokens)
-
+        """Stream chat responses chunk by chunk from Gemini."""
         try:
+            formatted_contents = self._translate_messages(messages)
+            config = self._build_config(
+                system_instruction=system_instruction,
+                temperature=temperature,
+                max_output_tokens=max_tokens,
+            )
+
             response_stream = await self.client.aio.models.generate_content_stream(
-                model=self.model,
-                contents=contents,
+                model=self.model_name,
+                contents=formatted_contents,
                 config=config,
             )
 
@@ -182,26 +150,9 @@ class AIService:
                 if chunk.text:
                     yield chunk.text
 
-        except ClientError as e:
-            error_msg = str(e)
-            if "429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg:
-                logger.error("Gemini rate limit exceeded during stream.")
-                raise AIServiceException(
-                    message="AI service quota exceeded. Please try again later."
-                )
-            logger.error("Gemini client error during stream: %s", e)
-            raise AIServiceException(
-                message=f"AI service error: {e}"
-            )
-
-        except ServerError as e:
-            logger.error("Gemini server error during stream: %s", e)
-            raise AIServiceException(
-                message="AI service is temporarily unavailable."
-            )
-
-        except Exception as e:
-            logger.error("Unexpected error during stream: %s", e)
-            raise AIServiceException(
-                message="An unexpected error occurred during streaming."
-            )
+        except (ClientError, ServerError, APIError) as exc:
+            logger.error(f"Error during Gemini response streaming: {exc}")
+            raise AIServiceException(f"Streaming error: {str(exc)}")
+        except Exception as exc:
+            logger.error(f"Unexpected error in chat_stream: {exc}", exc_info=True)
+            raise AIServiceException(f"Streaming error: {str(exc)}")

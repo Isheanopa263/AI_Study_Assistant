@@ -1,124 +1,77 @@
-# backend/app/api/chat.py
 """
-Chat session and message endpoints.
-Phase 4, Lesson 4: Added SSE streaming endpoint.
+API Router for Chat Sessions, Messaging, SSE Streaming, and Summarization.
 """
 
 import json
 import logging
-
-from fastapi import APIRouter, Depends
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, Depends, Query, Request, status
 from fastapi.responses import StreamingResponse
 
-from app.config import get_settings
-from app.core.dependencies import get_chat_repo, get_current_user, get_pagination
-from app.core.exceptions import AIServiceException, NotFoundException
-from app.core.rate_limiter import check_rate_limit
-from app.repositories.chat_repository import ChatRepository
 from app.schemas.chat import (
     ChatSessionCreate,
     ChatSessionResponse,
-    ChatSessionListResponse,
     MessageCreate,
     MessageResponse,
-    MessageListResponse,
     PaginationParams,
-    SessionSummaryResponse,
+    SummaryResponse,
 )
+from app.repositories.chat_repository import ChatRepository
 from app.services.ai_service import AIService
 from app.services.context_manager import ContextManager
-from app.services.prompts import TUTOR_SYSTEM_PROMPT
+from app.services.prompts import TUTOR_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
+from app.core.dependencies import get_chat_repo, get_current_user, get_pagination
+from app.core.rate_limiter import check_rate_limit
 
 logger = logging.getLogger(__name__)
+
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
 
+# Service singletons
+ai_service = AIService()
+context_manager = ContextManager()
 
-# ── HELPER ──
 
-
-async def _build_ai_messages(
-    repo: ChatRepository,
-    session_id: str,
-) -> list[dict]:
-    """
-    Load conversation history and build the full message list for the AI.
-    Uses ContextManager for token-aware history selection.
-
-    Returns:
-        List of {"role": ..., "content": ...} dicts ready for AIService.
-    """
-    history = await repo.get_messages(
-        session_id=session_id,
-        skip=0,
-        limit=100,  # Load more; context manager will trim
-    )
-
-    # Extract only role and content
-    raw_messages = [
-        {"role": msg.get("role", "user"), "content": msg.get("content", "")}
-        for msg in history
-    ]
-
-    # Use context manager to fit within token budget
-    context_manager = ContextManager()
-    selected_messages, enhanced_prompt = await context_manager.build_context(
-        history=raw_messages,
-        system_prompt=TUTOR_SYSTEM_PROMPT,
-    )
-
-    # Prepend system prompt (possibly enhanced with summary)
-    ai_messages = [{"role": "system", "content": enhanced_prompt}]
-    ai_messages.extend(selected_messages)
-
-    return ai_messages
-
-# ── SESSIONS ──
+def _extract_user_id(user: Any) -> str:
+    """Helper to extract user_id string whether user is a dict or string."""
+    if isinstance(user, dict):
+        return user.get("user_id") or user.get("id") or "stub-user-id"
+    return str(user)
 
 
 @router.post(
     "/sessions",
     response_model=ChatSessionResponse,
+    status_code=status.HTTP_201_CREATED,
     response_model_by_alias=False,
-    status_code=201,
 )
-async def create_session(
-    session_in: ChatSessionCreate,
-    user: dict = Depends(get_current_user),
+async def create_chat_session(
+    payload: ChatSessionCreate,
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
 ):
     """Create a new chat session."""
-    session_id = await repo.create_session(
-        user_id=user["user_id"],
-        title=session_in.title,
-    )
-    session = await repo.get_session(session_id)
-    logger.info("Session created: id=%s user=%s", session_id, user["user_id"])
-    return ChatSessionResponse.from_mongo(session)
+    user_id = _extract_user_id(user)
+    session = await repo.create_session(user_id=user_id, title=payload.title)
+    return session
 
 
 @router.get(
     "/sessions",
-    response_model=ChatSessionListResponse,
+    response_model=List[ChatSessionResponse],
     response_model_by_alias=False,
 )
-async def list_sessions(
+async def list_chat_sessions(
     pagination: PaginationParams = Depends(get_pagination),
-    user: dict = Depends(get_current_user),
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
 ):
-    """List all chat sessions for the current user."""
-    sessions = await repo.list_sessions(
-        user_id=user["user_id"],
-        skip=pagination.offset,
-        limit=pagination.limit,
+    """List all chat sessions for the authenticated user."""
+    user_id = _extract_user_id(user)
+    sessions, _ = await repo.list_sessions(
+        user_id=user_id, skip=pagination.skip, limit=pagination.limit
     )
-    total = await repo.count_sessions(user["user_id"])
-    return ChatSessionListResponse(
-        sessions=[ChatSessionResponse(**s) for s in sessions],
-        total=total,
-        page=pagination.page,
-        limit=pagination.limit,
-    )
+    return sessions
 
 
 @router.get(
@@ -126,257 +79,237 @@ async def list_sessions(
     response_model=ChatSessionResponse,
     response_model_by_alias=False,
 )
-async def get_session(
+async def get_chat_session(
     session_id: str,
-    user: dict = Depends(get_current_user),
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
 ):
-    """Get a single chat session by ID."""
-    session = await repo.get_session(session_id)
-    if not session:
-        raise NotFoundException(resource="ChatSession", resource_id=session_id)
-    return ChatSessionResponse(**session)
+    """Get session metadata including its conversation summary."""
+    user_id = _extract_user_id(user)
+    return await repo.get_session(session_id=session_id, user_id=user_id)
 
 
-@router.delete("/sessions/{session_id}", status_code=204)
-async def delete_session(
+@router.get(
+    "/sessions/{session_id}/full",
+    status_code=status.HTTP_200_OK,
+)
+async def get_full_chat_session(
     session_id: str,
-    user: dict = Depends(get_current_user),
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
 ):
-    """Delete a chat session and all its messages."""
-    deleted = await repo.delete_session(session_id)
-    if not deleted:
-        raise NotFoundException(resource="ChatSession", resource_id=session_id)
-    logger.info("Session deleted: id=%s", session_id)
-
-
-# ── MESSAGES (non-streaming) ──
+    """Get session metadata and all associated messages."""
+    user_id = _extract_user_id(user)
+    session = await repo.get_session(session_id=session_id, user_id=user_id)
+    messages, total = await repo.get_messages(session_id=session_id, user_id=user_id, limit=1000)
+    return {
+        "session": session,
+        "messages": messages,
+        "total_messages": total,
+    }
 
 
 @router.post(
     "/sessions/{session_id}/messages",
     response_model=MessageResponse,
+    status_code=status.HTTP_201_CREATED,
     response_model_by_alias=False,
-    status_code=201,
 )
 async def send_message(
     session_id: str,
-    message_in: MessageCreate,
-    user: dict = Depends(get_current_user),
+    payload: MessageCreate,
+    request: Request,
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
-    _: bool = Depends(check_rate_limit),
 ):
-    """
-    Send a message and get a complete AI response (non-streaming).
-    Use /stream for real-time token-by-token responses.
-    """
-    session = await repo.get_session(session_id)
-    if not session:
-        raise NotFoundException(resource="ChatSession", resource_id=session_id)
+    """Send a user message, process with Gemini using session memory, and store response."""
+    user_id = _extract_user_id(user)
+    await check_rate_limit(user_id)
 
-    user_message = await repo.add_message(
+    # 1. Fetch parent session to obtain memory summary
+    session = await repo.get_session(session_id=session_id, user_id=user_id)
+
+    # 2. Persist user message
+    user_msg = await repo.add_message(
         session_id=session_id,
+        user_id=user_id,
         role="user",
-        content=message_in.content,
+        content=payload.content,
     )
-    logger.info("User message saved: session=%s", session_id)
 
-    ai_messages = await _build_ai_messages(repo, session_id)
+    # 3. Retrieve session history
+    raw_messages, _ = await repo.get_messages(session_id=session_id, user_id=user_id, limit=50)
 
+    # 4. Construct context window and system prompt with summary memory
+    system_instruction = context_manager.build_system_instruction(
+        base_system_prompt=TUTOR_SYSTEM_PROMPT,
+        summary=session.get("summary")
+    )
+    contents = context_manager.build_context(
+        messages=raw_messages,
+        system_prompt=TUTOR_SYSTEM_PROMPT,
+        summary=session.get("summary"),
+    )
+
+    # 5. Generate AI response via Gemini
     try:
-        ai = AIService()
-        ai_response_text = await ai.chat(ai_messages)
-
-        ai_message = await repo.add_message(
-            session_id=session_id,
-            role="assistant",
-            content=ai_response_text,
+        ai_text = await ai_service.chat(
+            messages=contents,
+            system_instruction=system_instruction,
         )
-        logger.info("AI response saved: session=%s", session_id)
-        return MessageResponse(**ai_message)
+    except Exception as exc:
+        logger.warning(f"AI service unavailable, returning fallback: {exc}")
+        return user_msg
 
-    except Exception as e:
-        logger.warning(
-            "AI unavailable, returning user message. session=%s error=%s",
-            session_id, e,
-        )
-        return MessageResponse(**user_message)
+    # 6. Save and return assistant message
+    tokens_used = context_manager.estimate_tokens(ai_text)
+    assistant_msg = await repo.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role="assistant",
+        content=ai_text,
+        tokens_used=tokens_used,
+    )
+
+    return assistant_msg
 
 
-# ── MESSAGES (streaming via SSE) ──
+@router.post("/sessions/{session_id}/stream")
+async def stream_message(
+    session_id: str,
+    payload: MessageCreate,
+    request: Request,
+    user: Any = Depends(get_current_user),
+    repo: ChatRepository = Depends(get_chat_repo),
+):
+    """Stream AI response using Server-Sent Events (SSE)."""
+    user_id = _extract_user_id(user)
+    await check_rate_limit(user_id)
+
+    session = await repo.get_session(session_id=session_id, user_id=user_id)
+    await repo.add_message(session_id=session_id, user_id=user_id, role="user", content=payload.content)
+    raw_messages, _ = await repo.get_messages(session_id=session_id, user_id=user_id, limit=50)
+
+    system_instruction = context_manager.build_system_instruction(
+        base_system_prompt=TUTOR_SYSTEM_PROMPT,
+        summary=session.get("summary")
+    )
+    contents = context_manager.build_context(
+        messages=raw_messages,
+        system_prompt=TUTOR_SYSTEM_PROMPT,
+        summary=session.get("summary"),
+    )
+
+    async def event_generator():
+        accumulated_text = []
+        try:
+            async for chunk in ai_service.chat_stream(messages=contents, system_instruction=system_instruction):
+                accumulated_text.append(chunk)
+                data = json.dumps({"chunk": chunk})
+                yield f"data: {data}\n\n"
+
+            full_response = "".join(accumulated_text)
+            tokens_used = context_manager.estimate_tokens(full_response)
+            await repo.add_message(
+                session_id=session_id,
+                user_id=user_id,
+                role="assistant",
+                content=full_response,
+                tokens_used=tokens_used,
+            )
+            yield "data: [DONE]\n\n"
+        except Exception as exc:
+            logger.error(f"Error in stream_message SSE generator: {exc}")
+            yield f"data: {json.dumps({'error': 'Streaming interrupted'})}\n\n"
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 
 @router.post(
-    "/sessions/{session_id}/stream",
-    status_code=200,
+    "/sessions/{session_id}/summarize",
+    response_model=SummaryResponse,
+    status_code=status.HTTP_200_OK,
 )
-async def stream_message(
+async def summarize_chat_session(
     session_id: str,
-    message_in: MessageCreate,
-    user: dict = Depends(get_current_user),
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
-    _: bool = Depends(check_rate_limit),
 ):
     """
-    Send a message and receive the AI response as a stream of SSE events.
-
-    Each event is formatted as:
-        data: {"chunk": "partial text"}
-
-    The stream ends with:
-        data: [DONE]
-
-    The complete AI response is saved to MongoDB after streaming finishes.
+    Manually trigger conversation summarization.
+    Condenses conversation history using Gemini and persists summary on session document.
     """
-    # 1. Verify session exists
-    session = await repo.get_session(session_id)
-    if not session:
-        raise NotFoundException(resource="ChatSession", resource_id=session_id)
+    user_id = _extract_user_id(user)
+    session = await repo.get_session(session_id=session_id, user_id=user_id)
+    messages, total_count = await repo.get_messages(session_id=session_id, user_id=user_id, limit=100)
 
-    # 2. Save student's message
-    await repo.add_message(
+    if not messages:
+        return SummaryResponse(
+            session_id=session_id,
+            summary="No messages to summarize.",
+            messages_summarized=0,
+        )
+
+    formatted_transcript = "\n".join(
+        [f"{m['role'].upper()}: {m['content']}" for m in messages]
+    )
+
+    if session.get("summary"):
+        formatted_transcript = (
+            f"PREVIOUS SUMMARY:\n{session['summary']}\n\n"
+            f"NEW MESSAGES:\n{formatted_transcript}"
+        )
+
+    summary_content = [
+        {"role": "user", "parts": [{"text": f"Summarize this study session:\n{formatted_transcript}"}]}
+    ]
+
+    summary_text = await ai_service.chat(
+        messages=summary_content,
+        system_instruction=SUMMARY_SYSTEM_PROMPT,
+    )
+
+    await repo.update_summary(session_id=session_id, user_id=user_id, summary=summary_text)
+
+    return SummaryResponse(
         session_id=session_id,
-        role="user",
-        content=message_in.content,
+        summary=summary_text,
+        messages_summarized=total_count,
     )
-    logger.info("User message saved (stream): session=%s", session_id)
-
-    # 3. Build AI prompt
-    ai_messages = await _build_ai_messages(repo, session_id)
-
-    # 4. Create the SSE generator
-    async def event_generator():
-        """Yields SSE-formatted chunks and saves the full response at the end."""
-        full_response_parts = []
-
-        try:
-            ai = AIService()
-            async for chunk_text in ai.chat_stream(ai_messages):
-                full_response_parts.append(chunk_text)
-
-                # Format as SSE event
-                event_data = json.dumps({"chunk": chunk_text})
-                yield f"data: {event_data}\n\n"
-
-            # Signal end of stream
-            yield "data: [DONE]\n\n"
-
-            # Save complete response to MongoDB
-            complete_text = "".join(full_response_parts)
-            if complete_text:
-                await repo.add_message(
-                    session_id=session_id,
-                    role="assistant",
-                    content=complete_text,
-                )
-                logger.info(
-                    "AI stream response saved: session=%s length=%d",
-                    session_id, len(complete_text),
-                )
-
-        except AIServiceException as e:
-            # Send error to client as an SSE event
-            error_data = json.dumps({"error": e.message})
-            yield f"data: {error_data}\n\n"
-            yield "data: [DONE]\n\n"
-            logger.warning(
-                "AI stream error: session=%s error=%s", session_id, e.message
-            )
-
-        except Exception as e:
-            error_data = json.dumps({"error": "An unexpected error occurred."})
-            yield f"data: {error_data}\n\n"
-            yield "data: [DONE]\n\n"
-            logger.error("Unexpected stream error: session=%s error=%s", session_id, e)
-
-    # 5. Return streaming response
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",  # Disable nginx buffering if applicable
-        },
-    )
-
-
-# ── MESSAGES (list) ──
 
 
 @router.get(
     "/sessions/{session_id}/messages",
-    response_model=MessageListResponse,
+    response_model=List[MessageResponse],
     response_model_by_alias=False,
 )
-async def get_messages(
+async def get_chat_messages(
     session_id: str,
     pagination: PaginationParams = Depends(get_pagination),
-    user: dict = Depends(get_current_user),
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
 ):
-    """Get all messages in a chat session."""
-    session = await repo.get_session(session_id)
-    if not session:
-        raise NotFoundException(resource="ChatSession", resource_id=session_id)
-
-    messages = await repo.get_messages(
+    """Retrieve message history for a given chat session."""
+    user_id = _extract_user_id(user)
+    messages, _ = await repo.get_messages(
         session_id=session_id,
-        skip=pagination.offset,
+        user_id=user_id,
+        skip=pagination.skip,
         limit=pagination.limit,
     )
-    total = await repo.count_messages(session_id)
-    return MessageListResponse(
-        messages=[MessageResponse(**m) for m in messages],
-        total=total,
-        session_id=session_id,
-    )
+    return messages
 
 
-# ── SUMMARY ──
-
-
-@router.get(
-    "/sessions/{session_id}/summary",
-    response_model=SessionSummaryResponse,
-    response_model_by_alias=False,
+@router.delete(
+    "/sessions/{session_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
 )
-async def get_session_summary(
+async def delete_chat_session(
     session_id: str,
-    user: dict = Depends(get_current_user),
+    user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
 ):
-    """Get a summary of a chat session."""
-    session = await repo.get_session(session_id)
-    if not session:
-        raise NotFoundException(resource="ChatSession", resource_id=session_id)
-
-    count = await repo.count_messages(session_id)
-    return SessionSummaryResponse(
-        session_id=session_id,
-        summary_format="brief",
-        summary=f"Session '{session.get('title', 'Untitled')}' with {count} messages.",
-        message_count=count,
-    )
-
-
-@router.get(
-    "/sessions/{session_id}/full",
-    response_model_by_alias=False,
-)
-async def get_full_conversation(
-    session_id: str,
-    user: dict = Depends(get_current_user),
-    repo: ChatRepository = Depends(get_chat_repo),
-):
-    """Get the full conversation (session + all messages)."""
-    session = await repo.get_session(session_id)
-    if not session:
-        raise NotFoundException(resource="ChatSession", resource_id=session_id)
-
-    messages = await repo.get_messages(session_id, limit=500)
-    return {
-        "session": ChatSessionResponse(**session),
-        "messages": [MessageResponse(**m) for m in messages],
-    }
+    """Delete session and associated message history."""
+    user_id = _extract_user_id(user)
+    await repo.delete_session(session_id=session_id, user_id=user_id)
+    return None

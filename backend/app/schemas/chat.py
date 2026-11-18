@@ -1,153 +1,68 @@
+"""
+Pydantic Schemas for Chat Operations.
+Includes session creation, message schemas, and summary models.
+"""
+
 from datetime import datetime
 from typing import List, Optional
+from pydantic import BaseModel, ConfigDict, Field
 
-from pydantic import BaseModel, Field, computed_field
-from app.schemas.base import MongoModel, ObjectIdStr
-
-# ------------------------------------------------------------------------------
-# PAGINATION SCHEMA
-# ------------------------------------------------------------------------------
 
 class PaginationParams(BaseModel):
-    limit: int = Field(
-        default=10,
-        ge=1,
-        le=100,
-        description="Number of items to return per page.",
-    )
-    page: int = Field(
-        default=1,
-        ge=1,
-        description="Page number starting from 1.",
-    )
-
-    @property
-    def offset(self) -> int:
-        return (self.page - 1) * self.limit
-
-
-# ------------------------------------------------------------------------------
-# MESSAGE SCHEMAS
-# ------------------------------------------------------------------------------
+    """Standard pagination query parameters."""
+    skip: int = Field(default=0, ge=0, description="Number of items to skip")
+    limit: int = Field(default=20, ge=1, le=100, description="Items per page")
 
 
 class MessageCreate(BaseModel):
+    """Payload for creating a new user message."""
     content: str = Field(
         ...,
         min_length=1,
-        max_length=5000,
-        description="The message content from the student. Cannot be empty.",
-        examples=["Explain recursion in simple English."],
+        max_length=10000,
+        description="The message text from the user",
+        examples=["Explain quantum entanglement in simple terms."]
     )
 
 
-class MessageResponse(MongoModel):
-    message_id: ObjectIdStr = Field(alias="id")
-    content: str
-    role: str = "user"
-    created_at: datetime
+class MessageResponse(BaseModel):
+    """Response model for a single chat message."""
+    message_id: str = Field(..., description="Unique message string ID")
+    session_id: str = Field(..., description="Parent session ID")
+    user_id: str = Field(..., description="Owner user ID")
+    role: str = Field(..., description="Message author role (user/assistant/system)")
+    content: str = Field(..., description="Text content of the message")
+    tokens_used: Optional[int] = Field(default=0, description="Token count consumed")
+    created_at: datetime = Field(..., description="ISO creation timestamp")
 
-    @classmethod
-    def from_mongo(cls, data: dict) -> Optional["MessageResponse"]:
-        if data is None:
-            return None
-        data = dict(data)
-        if "_id" in data:
-            data["message_id"] = str(data.pop("_id"))
-        return cls(**data)
-
-
-# ------------------------------------------------------------------------------
-# CHAT SESSION SCHEMAS
-# ------------------------------------------------------------------------------
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 
 class ChatSessionCreate(BaseModel):
+    """Payload for creating a new chat session."""
     title: Optional[str] = Field(
         default=None,
-        min_length=1,
-        max_length=200,
-        description="Optional title for the chat session.",
-        examples=["Study session: Data Structures"],
+        max_length=100,
+        description="Optional title for the study session"
     )
 
 
-class ChatSessionResponse(MongoModel):
-    session_id: ObjectIdStr = Field(alias="id")
-    user_id: str
-    title: Optional[str] = None
-    message_count: int = 0
-    created_at: datetime
-    updated_at: Optional[datetime] = None
+class ChatSessionResponse(BaseModel):
+    """Response model representing a chat session."""
+    session_id: str = Field(..., description="Unique chat session ID")
+    user_id: str = Field(..., description="Owner user ID")
+    title: Optional[str] = Field(default="New Study Session", description="Session title")
+    summary: Optional[str] = Field(default=None, description="Condensed conversation memory summary")
+    message_count: int = Field(default=0, description="Total messages in session")
+    created_at: datetime = Field(..., description="ISO creation timestamp")
+    updated_at: datetime = Field(..., description="ISO last updated timestamp")
 
-    @classmethod
-    def from_mongo(cls, data: dict) -> Optional["ChatSessionResponse"]:
-        if data is None:
-            return None
-        data = dict(data)
-        if "_id" in data:
-            data["session_id"] = str(data.pop("_id"))
-        return cls(**data)
+    model_config = ConfigDict(populate_by_name=True, from_attributes=True)
 
 
-class ChatSessionListResponse(BaseModel):
-    sessions: List[ChatSessionResponse] = Field(
-        default=[],
-        description="List of chat sessions for the current page.",
-    )
-    total: int = Field(
-        default=0,
-        description="Total number of sessions across all pages.",
-    )
-    page: int = Field(
-        default=1,
-        description="Current page number.",
-    )
-    limit: int = Field(
-        default=10,
-        description="Number of sessions per page.",
-    )
-
-
-# ------------------------------------------------------------------------------
-# MESSAGE LIST SCHEMA
-# ------------------------------------------------------------------------------
-
-
-class MessageListResponse(BaseModel):
-    messages: List[MessageResponse] = Field(
-        default=[],
-        description="List of messages for the current page.",
-    )
-    total: int = Field(
-        default=0,
-        description="Total number of messages in this session.",
-    )
-    session_id: str = Field(
-        ...,
-        description="The session these messages belong to.",
-    )
-
-
-# ------------------------------------------------------------------------------
-# SUMMARY SCHEMA
-# ------------------------------------------------------------------------------
-
-
-class SessionSummaryResponse(BaseModel):
-    session_id: str = Field(
-        ...,
-        description="The session being summarized.",
-    )
-    summary_format: str = Field(
-        ...,
-        description="The requested format: brief or detailed.",
-    )
-    summary: str = Field(
-        ...,
-        description="The generated summary content.",
-    )
-    message_count: int = Field(
-        default=0,
-        description="Number of messages included in the summary.",
-    )
+class SummaryResponse(BaseModel):
+    """Response returned after manually triggering a session summary."""
+    session_id: str = Field(..., description="Target session ID")
+    summary: str = Field(..., description="Generated conversation summary")
+    messages_summarized: int = Field(..., description="Count of historical messages processed")
+    created_at: datetime = Field(default_factory=datetime.utcnow)

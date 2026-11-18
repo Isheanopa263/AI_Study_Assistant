@@ -1,135 +1,156 @@
-# app/repositories/chat_repository.py
 """
-Chat repository backed by MongoDB.
-
-Manages two collections:
-  - chat_sessions: One document per conversation
-  - messages: One document per message, linked via session_id
+MongoDB Repository for Chat Operations.
+Handles persistence for sessions, messages, and conversation summaries.
 """
 
-from datetime import datetime, timezone
-
+import logging
+from datetime import datetime
+from typing import Dict, List, Optional, Tuple
 from motor.motor_asyncio import AsyncIOMotorDatabase
 
 from app.repositories.base import BaseRepository
+from app.core.exceptions import DatabaseException, NotFoundException
+
+logger = logging.getLogger(__name__)
 
 
-class ChatRepository:
-    """
-    MongoDB-backed repository for chat sessions and messages.
-
-    Manages TWO collections, so it doesn't inherit from BaseRepository.
-    Uses BaseRepository's static helpers directly.
-    """
+class ChatRepository(BaseRepository):
+    """Repository handling CRUD operations for chat_sessions and messages collections."""
 
     def __init__(self, db: AsyncIOMotorDatabase):
-        self.db = db
-        self.sessions = db["chat_sessions"]
-        self.messages = db["messages"]
+        super().__init__(db, "chat_sessions")
+        self.sessions_collection = self.collection
+        self.messages_collection = db["messages"]
 
-    # ── SESSIONS ──
-
-    async def create_session(self, user_id: str, title: str | None) -> str:
-        """Create a new chat session. Returns the session_id as a string."""
-        now = datetime.now(timezone.utc).isoformat()
-        session_data = {
+    async def create_session(self, user_id: str, title: Optional[str] = None) -> Dict:
+        """Create a new chat session for a user."""
+        now = datetime.utcnow()
+        doc = {
             "user_id": user_id,
-            "title": title,
+            "title": title or "New Study Session",
+            "summary": None,
             "created_at": now,
-            "message_count": 0,
+            "updated_at": now,
         }
-        result = await self.sessions.insert_one(session_data)
-        return str(result.inserted_id)
 
-    async def get_session(self, session_id: str) -> dict | None:
-        """Get a single session by ID. Returns dict with 'session_id' field."""
         try:
-            oid = BaseRepository._to_object_id(session_id)
-        except ValueError:
-            return None
-        doc = await self.sessions.find_one({"_id": oid})
-        return BaseRepository._to_str_id(doc, id_field="session_id")
+            result = await self.sessions_collection.insert_one(doc)
+            doc["_id"] = result.inserted_id
+            logger.info(f"Chat session created in DB: id={result.inserted_id} user={user_id}")
+            return self._to_str_id(doc, id_field="session_id")
+        except Exception as e:
+            logger.error(f"Failed to create chat session: {e}", exc_info=True)
+            raise DatabaseException(f"Failed to create chat session: {str(e)}")
+
+    async def get_session(self, session_id: str, user_id: str) -> Dict:
+        """Retrieve a single chat session verifying user ownership."""
+        oid = self._to_object_id(session_id)
+        doc = await self.sessions_collection.find_one({"_id": oid, "user_id": user_id})
+
+        if not doc:
+            raise NotFoundException("ChatSession", session_id)
+
+        return self._to_str_id(doc, id_field="session_id")
 
     async def list_sessions(
-        self, user_id: str, skip: int = 0, limit: int = 10
-    ) -> list[dict]:
-        """List sessions for a user, newest first."""
+        self, user_id: str, skip: int = 0, limit: int = 20
+    ) -> Tuple[List[Dict], int]:
+        """List chat sessions owned by user with pagination."""
+        query = {"user_id": user_id}
+        total = await self.sessions_collection.count_documents(query)
+
         cursor = (
-            self.sessions.find({"user_id": user_id})
-            .sort("created_at", -1)
+            self.sessions_collection.find(query)
+            .sort("updated_at", -1)
             .skip(skip)
             .limit(limit)
         )
         docs = await cursor.to_list(length=limit)
-        return [
-            BaseRepository._to_str_id(doc, id_field="session_id") for doc in docs
-        ]
+        formatted = [self._to_str_id(doc, id_field="session_id") for doc in docs]
+        return formatted, total
 
-    async def count_sessions(self, user_id: str) -> int:
-        """Count total sessions for a user."""
-        return await self.sessions.count_documents({"user_id": user_id})
+    async def update_summary(self, session_id: str, user_id: str, summary: str) -> Dict:
+        """Persist a conversation summary onto a chat session document."""
+        oid = self._to_object_id(session_id)
+        now = datetime.utcnow()
 
-    async def delete_session(self, session_id: str) -> bool:
-        """Delete a session AND all its messages."""
-        try:
-            oid = BaseRepository._to_object_id(session_id)
-        except ValueError:
-            return False
+        result = await self.sessions_collection.find_one_and_update(
+            {"_id": oid, "user_id": user_id},
+            {"$set": {"summary": summary, "updated_at": now}},
+            return_document=True,
+        )
 
-        # Delete messages first
-        await self.messages.delete_many({"session_id": session_id})
-        # Then delete the session
-        result = await self.sessions.delete_one({"_id": oid})
-        return result.deleted_count > 0
+        if not result:
+            raise NotFoundException("ChatSession", session_id)
 
-    # ── MESSAGES ──
+        logger.info(f"Session summary updated in DB: session={session_id}")
+        return self._to_str_id(result, id_field="session_id")
 
     async def add_message(
-        self, session_id: str, role: str, content: str
-    ) -> dict:
-        """
-        Add a message to a session.
-        Returns the full message dict with 'message_id' field.
-        """
-        now = datetime.now(timezone.utc).isoformat()
-        message_data = {
+        self,
+        session_id: str,
+        user_id: str,
+        role: str,
+        content: str,
+        tokens_used: int = 0,
+    ) -> Dict:
+        """Add a message document and update parent session's updated_at timestamp."""
+        sess_oid = self._to_object_id(session_id)
+        session = await self.sessions_collection.find_one({"_id": sess_oid, "user_id": user_id})
+        if not session:
+            raise NotFoundException("ChatSession", session_id)
+
+        now = datetime.utcnow()
+        doc = {
             "session_id": session_id,
+            "user_id": user_id,
             "role": role,
             "content": content,
+            "tokens_used": tokens_used,
             "created_at": now,
         }
-        result = await self.messages.insert_one(message_data)
 
-        # Update session metadata
         try:
-            oid = BaseRepository._to_object_id(session_id)
-            await self.sessions.update_one(
-                {"_id": oid},
-                {
-                    "$inc": {"message_count": 1},
-                },
-            )
-        except ValueError:
-            pass
+            res = await self.messages_collection.insert_one(doc)
+            doc["_id"] = res.inserted_id
 
-        message_data["_id"] = result.inserted_id
-        return BaseRepository._to_str_id(message_data, id_field="message_id")
+            await self.sessions_collection.update_one(
+                {"_id": sess_oid},
+                {"$set": {"updated_at": now}}
+            )
+
+            return self._to_str_id(doc, id_field="message_id")
+        except Exception as e:
+            logger.error(f"Failed to add message: {e}", exc_info=True)
+            raise DatabaseException(f"Failed to add message: {str(e)}")
 
     async def get_messages(
-        self, session_id: str, skip: int = 0, limit: int = 100
-    ) -> list[dict]:
-        """Get messages for a session, oldest first (chronological)."""
+        self, session_id: str, user_id: str, skip: int = 0, limit: int = 100
+    ) -> Tuple[List[Dict], int]:
+        """Get messages for a session in chronological order."""
+        await self.get_session(session_id, user_id)
+
+        query = {"session_id": session_id, "user_id": user_id}
+        total = await self.messages_collection.count_documents(query)
+
         cursor = (
-            self.messages.find({"session_id": session_id})
+            self.messages_collection.find(query)
             .sort("created_at", 1)
             .skip(skip)
             .limit(limit)
         )
         docs = await cursor.to_list(length=limit)
-        return [
-            BaseRepository._to_str_id(doc, id_field="message_id") for doc in docs
-        ]
+        formatted = [self._to_str_id(doc, id_field="message_id") for doc in docs]
+        return formatted, total
 
-    async def count_messages(self, session_id: str) -> int:
-        """Count messages in a session."""
-        return await self.messages.count_documents({"session_id": session_id})
+    async def delete_session(self, session_id: str, user_id: str) -> bool:
+        """Delete session and all associated messages."""
+        oid = self._to_object_id(session_id)
+        result = await self.sessions_collection.delete_one({"_id": oid, "user_id": user_id})
+
+        if result.deleted_count == 0:
+            raise NotFoundException("ChatSession", session_id)
+
+        await self.messages_collection.delete_many({"session_id": session_id})
+        logger.info(f"Deleted chat session and messages: session={session_id}")
+        return True
