@@ -1,7 +1,6 @@
 """
-API Router for Chat Sessions, Messaging, SSE Streaming, and Summarization.
+API Router for Chat Sessions, Messaging, SSE Streaming, Summarization, and Grounded RAG.
 """
-
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -16,15 +15,22 @@ from app.schemas.chat import (
     PaginationParams,
     SummaryResponse,
 )
+from app.schemas.grounding import GroundedChatRequest, GroundedChatResponse
 from app.repositories.chat_repository import ChatRepository
+from app.repositories.document_repository import DocumentRepository
 from app.services.ai_service import AIService
 from app.services.context_manager import ContextManager
+from app.services.grounding_service import GroundingService
 from app.services.prompts import TUTOR_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
-from app.core.dependencies import get_chat_repo, get_current_user, get_pagination
+from app.core.dependencies import (
+    get_chat_repo,
+    get_document_repo,
+    get_current_user,
+    get_pagination,
+)
 from app.core.rate_limiter import check_rate_limit
 
 logger = logging.getLogger(__name__)
-
 router = APIRouter(prefix="/api/chat", tags=["Chat"])
 
 # Service singletons
@@ -125,22 +131,14 @@ async def send_message(
     """Send a user message, process with Gemini using session memory, and store response."""
     user_id = _extract_user_id(user)
     await check_rate_limit(user_id)
-
-    # 1. Fetch parent session to obtain memory summary
     session = await repo.get_session(session_id=session_id, user_id=user_id)
-
-    # 2. Persist user message
     user_msg = await repo.add_message(
         session_id=session_id,
         user_id=user_id,
         role="user",
         content=payload.content,
     )
-
-    # 3. Retrieve session history
     raw_messages, _ = await repo.get_messages(session_id=session_id, user_id=user_id, limit=50)
-
-    # 4. Construct context window and system prompt with summary memory
     system_instruction = context_manager.build_system_instruction(
         base_system_prompt=TUTOR_SYSTEM_PROMPT,
         summary=session.get("summary")
@@ -150,8 +148,6 @@ async def send_message(
         system_prompt=TUTOR_SYSTEM_PROMPT,
         summary=session.get("summary"),
     )
-
-    # 5. Generate AI response via Gemini
     try:
         ai_text = await ai_service.chat(
             messages=contents,
@@ -161,7 +157,6 @@ async def send_message(
         logger.warning(f"AI service unavailable, returning fallback: {exc}")
         return user_msg
 
-    # 6. Save and return assistant message
     tokens_used = context_manager.estimate_tokens(ai_text)
     assistant_msg = await repo.add_message(
         session_id=session_id,
@@ -170,7 +165,6 @@ async def send_message(
         content=ai_text,
         tokens_used=tokens_used,
     )
-
     return assistant_msg
 
 
@@ -185,11 +179,9 @@ async def stream_message(
     """Stream AI response using Server-Sent Events (SSE)."""
     user_id = _extract_user_id(user)
     await check_rate_limit(user_id)
-
     session = await repo.get_session(session_id=session_id, user_id=user_id)
     await repo.add_message(session_id=session_id, user_id=user_id, role="user", content=payload.content)
     raw_messages, _ = await repo.get_messages(session_id=session_id, user_id=user_id, limit=50)
-
     system_instruction = context_manager.build_system_instruction(
         base_system_prompt=TUTOR_SYSTEM_PROMPT,
         summary=session.get("summary")
@@ -207,7 +199,6 @@ async def stream_message(
                 accumulated_text.append(chunk)
                 data = json.dumps({"chunk": chunk})
                 yield f"data: {data}\n\n"
-
             full_response = "".join(accumulated_text)
             tokens_used = context_manager.estimate_tokens(full_response)
             await repo.add_message(
@@ -235,47 +226,87 @@ async def summarize_chat_session(
     user: Any = Depends(get_current_user),
     repo: ChatRepository = Depends(get_chat_repo),
 ):
-    """
-    Manually trigger conversation summarization.
-    Condenses conversation history using Gemini and persists summary on session document.
-    """
+    """Manually trigger conversation summarization using Gemini."""
     user_id = _extract_user_id(user)
     session = await repo.get_session(session_id=session_id, user_id=user_id)
     messages, total_count = await repo.get_messages(session_id=session_id, user_id=user_id, limit=100)
-
     if not messages:
         return SummaryResponse(
             session_id=session_id,
             summary="No messages to summarize.",
             messages_summarized=0,
         )
-
     formatted_transcript = "\n".join(
         [f"{m['role'].upper()}: {m['content']}" for m in messages]
     )
-
     if session.get("summary"):
         formatted_transcript = (
             f"PREVIOUS SUMMARY:\n{session['summary']}\n\n"
             f"NEW MESSAGES:\n{formatted_transcript}"
         )
-
     summary_content = [
         {"role": "user", "parts": [{"text": f"Summarize this study session:\n{formatted_transcript}"}]}
     ]
-
     summary_text = await ai_service.chat(
         messages=summary_content,
         system_instruction=SUMMARY_SYSTEM_PROMPT,
     )
-
     await repo.update_summary(session_id=session_id, user_id=user_id, summary=summary_text)
-
     return SummaryResponse(
         session_id=session_id,
         summary=summary_text,
         messages_summarized=total_count,
     )
+
+
+@router.post(
+    "/sessions/{session_id}/grounded",
+    response_model=GroundedChatResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Send a grounded study query using uploaded documents as context",
+)
+async def grounded_chat(
+    session_id: str,
+    payload: GroundedChatRequest,
+    user: Any = Depends(get_current_user),
+    repo: ChatRepository = Depends(get_chat_repo),
+    doc_repo: DocumentRepository = Depends(get_document_repo),
+) -> GroundedChatResponse:
+    """Execute a grounded study query against specific document context sources."""
+    user_id = _extract_user_id(user)
+    await check_rate_limit(user_id)
+
+    # Verify session exists
+    await repo.get_session(session_id=session_id, user_id=user_id)
+
+    # Persist user query
+    await repo.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role="user",
+        content=payload.query,
+    )
+
+    # Execute RAG Grounding workflow
+    grounding_service = GroundingService(doc_repo=doc_repo, ai_service=ai_service)
+    response = await grounding_service.generate_grounded_response(
+        user_id=user_id,
+        query=payload.query,
+        document_ids=payload.document_ids,
+        strict_mode=payload.strict_mode,
+    )
+
+    # Persist assistant response
+    tokens_used = context_manager.estimate_tokens(response.answer)
+    await repo.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role="assistant",
+        content=response.answer,
+        tokens_used=tokens_used,
+    )
+
+    return response
 
 
 @router.get(
