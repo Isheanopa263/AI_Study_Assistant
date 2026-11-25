@@ -1,5 +1,5 @@
 """
-API Router for Chat Sessions, Messaging, SSE Streaming, Summarization, and Grounded RAG.
+API Router for Chat Sessions, Messaging, SSE Streaming, Summarization, Grounded RAG, and Tool Calling.
 """
 import json
 import logging
@@ -16,6 +16,7 @@ from app.schemas.chat import (
     SummaryResponse,
 )
 from app.schemas.grounding import GroundedChatRequest, GroundedChatResponse
+from app.schemas.tools import ToolChatRequest, ToolChatResponse, ToolCallDetail
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.document_repository import DocumentRepository
 from app.services.ai_service import AIService
@@ -153,6 +154,8 @@ async def send_message(
             messages=contents,
             system_instruction=system_instruction,
         )
+        if isinstance(ai_text, dict):
+            ai_text = ai_text.get("answer", "")
     except Exception as exc:
         logger.warning(f"AI service unavailable, returning fallback: {exc}")
         return user_msg
@@ -247,10 +250,12 @@ async def summarize_chat_session(
     summary_content = [
         {"role": "user", "parts": [{"text": f"Summarize this study session:\n{formatted_transcript}"}]}
     ]
-    summary_text = await ai_service.chat(
+    summary_result = await ai_service.chat(
         messages=summary_content,
         system_instruction=SUMMARY_SYSTEM_PROMPT,
     )
+    summary_text = summary_result.get("answer", "") if isinstance(summary_result, dict) else summary_result
+
     await repo.update_summary(session_id=session_id, user_id=user_id, summary=summary_text)
     return SummaryResponse(
         session_id=session_id,
@@ -275,11 +280,7 @@ async def grounded_chat(
     """Execute a grounded study query against specific document context sources."""
     user_id = _extract_user_id(user)
     await check_rate_limit(user_id)
-
-    # Verify session exists
     await repo.get_session(session_id=session_id, user_id=user_id)
-
-    # Persist user query
     await repo.add_message(
         session_id=session_id,
         user_id=user_id,
@@ -287,7 +288,6 @@ async def grounded_chat(
         content=payload.query,
     )
 
-    # Execute RAG Grounding workflow
     grounding_service = GroundingService(doc_repo=doc_repo, ai_service=ai_service)
     response = await grounding_service.generate_grounded_response(
         user_id=user_id,
@@ -296,7 +296,6 @@ async def grounded_chat(
         strict_mode=payload.strict_mode,
     )
 
-    # Persist assistant response
     tokens_used = context_manager.estimate_tokens(response.answer)
     await repo.add_message(
         session_id=session_id,
@@ -307,6 +306,81 @@ async def grounded_chat(
     )
 
     return response
+
+
+@router.post(
+    "/sessions/{session_id}/tools",
+    response_model=ToolChatResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Send a query using registered backend tools for calculation and schedule generation",
+)
+async def tool_augmented_chat(
+    session_id: str,
+    payload: ToolChatRequest,
+    user: Any = Depends(get_current_user),
+    repo: ChatRepository = Depends(get_chat_repo),
+) -> ToolChatResponse:
+    """Execute a query with Gemini Function Calling capabilities enabled."""
+    user_id = _extract_user_id(user)
+    await check_rate_limit(user_id)
+
+    # 1. Verify session exists
+    session = await repo.get_session(session_id=session_id, user_id=user_id)
+
+    # 2. Persist user prompt
+    await repo.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role="user",
+        content=payload.prompt,
+    )
+
+    # 3. Retrieve conversation history
+    raw_messages, _ = await repo.get_messages(session_id=session_id, user_id=user_id, limit=20)
+    contents = context_manager.build_context(
+        messages=raw_messages,
+        system_prompt=TUTOR_SYSTEM_PROMPT,
+        summary=session.get("summary"),
+    )
+
+    # 4. Invoke AI with tool execution enabled
+    ai_result = await ai_service.chat(
+        messages=contents,
+        system_instruction=TUTOR_SYSTEM_PROMPT,
+        enable_tools=True,
+    )
+
+    if isinstance(ai_result, dict):
+        answer_text = ai_result.get("answer", "")
+        raw_tool_calls = ai_result.get("tool_calls", [])
+    else:
+        answer_text = str(ai_result)
+        raw_tool_calls = []
+
+    tool_details = [
+        ToolCallDetail(
+            tool_name=tc["tool_name"],
+            arguments=tc["arguments"],
+            result=tc["result"],
+        )
+        for tc in raw_tool_calls
+    ]
+
+    # 5. Persist final assistant response
+    tokens_used = context_manager.estimate_tokens(answer_text)
+    await repo.add_message(
+        session_id=session_id,
+        user_id=user_id,
+        role="assistant",
+        content=answer_text,
+        tokens_used=tokens_used,
+    )
+
+    return ToolChatResponse(
+        answer=answer_text,
+        tool_calls=tool_details,
+        tokens_used=tokens_used,
+    )
 
 
 @router.get(
