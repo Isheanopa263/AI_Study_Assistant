@@ -1,5 +1,5 @@
 """
-API Router for Chat Sessions, Messaging, SSE Streaming, Summarization, Grounded RAG, and Tool Calling.
+API Router for Chat Sessions, Messaging, SSE Streaming, Summarization, Grounded RAG, Tool Calling, and Coaching.
 """
 import json
 import logging
@@ -17,11 +17,13 @@ from app.schemas.chat import (
 )
 from app.schemas.grounding import GroundedChatRequest, GroundedChatResponse
 from app.schemas.tools import ToolChatRequest, ToolChatResponse, ToolCallDetail
+from app.schemas.coaching import CoachingTurnRequest, CoachingTurnResponse
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.document_repository import DocumentRepository
 from app.services.ai_service import AIService
 from app.services.context_manager import ContextManager
 from app.services.grounding_service import GroundingService
+from app.services.coaching_service import CoachingService
 from app.services.prompts import TUTOR_SYSTEM_PROMPT, SUMMARY_SYSTEM_PROMPT
 from app.core.dependencies import (
     get_chat_repo,
@@ -44,6 +46,13 @@ def _extract_user_id(user: Any) -> str:
     if isinstance(user, dict):
         return user.get("user_id") or user.get("id") or "stub-user-id"
     return str(user)
+
+
+def get_coaching_service(
+    chat_repo: ChatRepository = Depends(get_chat_repo),
+) -> CoachingService:
+    """Dependency provider for CoachingService."""
+    return CoachingService(chat_repo=chat_repo)
 
 
 @router.post(
@@ -323,11 +332,7 @@ async def tool_augmented_chat(
     """Execute a query with Gemini Function Calling capabilities enabled."""
     user_id = _extract_user_id(user)
     await check_rate_limit(user_id)
-
-    # 1. Verify session exists
     session = await repo.get_session(session_id=session_id, user_id=user_id)
-
-    # 2. Persist user prompt
     await repo.add_message(
         session_id=session_id,
         user_id=user_id,
@@ -335,7 +340,6 @@ async def tool_augmented_chat(
         content=payload.prompt,
     )
 
-    # 3. Retrieve conversation history
     raw_messages, _ = await repo.get_messages(session_id=session_id, user_id=user_id, limit=20)
     contents = context_manager.build_context(
         messages=raw_messages,
@@ -343,7 +347,6 @@ async def tool_augmented_chat(
         summary=session.get("summary"),
     )
 
-    # 4. Invoke AI with tool execution enabled
     ai_result = await ai_service.chat(
         messages=contents,
         system_instruction=TUTOR_SYSTEM_PROMPT,
@@ -366,7 +369,6 @@ async def tool_augmented_chat(
         for tc in raw_tool_calls
     ]
 
-    # 5. Persist final assistant response
     tokens_used = context_manager.estimate_tokens(answer_text)
     await repo.add_message(
         session_id=session_id,
@@ -381,6 +383,32 @@ async def tool_augmented_chat(
         tool_calls=tool_details,
         tokens_used=tokens_used,
     )
+
+
+@router.post(
+    "/sessions/{session_id}/coaching",
+    response_model=CoachingTurnResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Conduct an interactive coaching turn with real-time diagnostic evaluation",
+)
+async def interactive_coaching(
+    session_id: str,
+    payload: CoachingTurnRequest,
+    user: Any = Depends(get_current_user),
+    repo: ChatRepository = Depends(get_chat_repo),
+    coaching_service: CoachingService = Depends(get_coaching_service),
+) -> CoachingTurnResponse:
+    """Execute a multi-turn coaching turn in Socratic, Explanatory, Quiz, or Review mode."""
+    user_id = _extract_user_id(user)
+    await check_rate_limit(user_id)
+    await repo.get_session(session_id=session_id, user_id=user_id)
+
+    response = await coaching_service.conduct_coaching_turn(
+        session_id=session_id,
+        user_id=user_id,
+        request=payload,
+    )
+    return response
 
 
 @router.get(
