@@ -139,3 +139,5 @@ async def retry_with_backoff(
 
     if last_exception:
         raise last_exception
+    
+ai_circuit_breaker = CircuitBreaker()
