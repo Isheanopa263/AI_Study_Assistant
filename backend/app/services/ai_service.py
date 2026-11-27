@@ -1,6 +1,6 @@
 """
 AI Service layer interacting with Google Gemini API via google-genai SDK.
-Handles text generation, streaming, token counting, and function calling tools.
+Hardened with Circuit Breaker, Exponential Backoff Retries, and Model Fallback.
 """
 import logging
 from typing import Any, AsyncGenerator, Dict, List, Optional, Union
@@ -10,18 +10,29 @@ from google.genai.errors import APIError, ClientError, ServerError
 
 from app.config import settings
 from app.core.exceptions import AIServiceException
+from app.core.resilience import (
+    CircuitBreaker,
+    CircuitBreakerOpenException,
+    retry_with_backoff,
+)
 from app.services.tools import REGISTERED_GEMINI_TOOLS, execute_registered_tool
 
 logger = logging.getLogger(__name__)
 
 
 class AIService:
-    """Service wrapper for Google Gemini client operations."""
+    """Resilient Service wrapper for Google Gemini client operations."""
 
     def __init__(self):
         self.api_key = settings.GEMINI_API_KEY
-        self.model_name = settings.GEMINI_MODEL or "gemini-3.5-flash"
+        self.primary_model = settings.GEMINI_MODEL or "gemini-2.5-flash"
+        self.fallback_model = getattr(settings, "GEMINI_FALLBACK_MODEL", "gemini-2.5-flash-lite")
         self._client: Optional[genai.Client] = None
+        self.circuit_breaker = CircuitBreaker(
+            name="GeminiClientCircuitBreaker",
+            failure_threshold=3,
+            recovery_timeout=30.0,
+        )
 
     @property
     def client(self) -> genai.Client:
@@ -67,6 +78,29 @@ class AIService:
                 )
         return formatted
 
+    async def _execute_generate_content(
+        self,
+        model_name: str,
+        contents: List[types.Content],
+        config: types.GenerateContentConfig,
+    ) -> Any:
+        """Low-level generation call executed inside Circuit Breaker and retry loops."""
+        async def _call():
+            return await self.client.aio.models.generate_content(
+                model=model_name,
+                contents=contents,
+                config=config,
+            )
+
+        # Retry on transient ServerErrors (503) or rate limits (429)
+        return await retry_with_backoff(
+            coroutine_func=_call,
+            retriable_exceptions=(ServerError,),
+            max_retries=3,
+            initial_delay=0.5,
+            backoff_factor=2.0,
+        )
+
     async def chat(
         self,
         messages: List[Union[Dict[str, Any], types.Content]],
@@ -75,7 +109,7 @@ class AIService:
         max_tokens: Optional[int] = None,
         enable_tools: bool = False,
     ) -> Union[str, Dict[str, Any]]:
-        """Send chat messages to Gemini and return text response or tool response object."""
+        """Send chat messages to Gemini with circuit breaker, retries, and fallback model routing."""
         try:
             formatted_contents = self._translate_messages(messages)
             tools = REGISTERED_GEMINI_TOOLS if enable_tools else None
@@ -86,21 +120,39 @@ class AIService:
                 tools=tools,
             )
 
-            response = await self.client.aio.models.generate_content(
-                model=self.model_name,
-                contents=formatted_contents,
-                config=config,
-            )
+            # Circuit-breaker protected execution with primary model
+            active_model = self.primary_model
+            try:
+                response = await self.circuit_breaker.call(
+                    self._execute_generate_content,
+                    model_name=active_model,
+                    contents=formatted_contents,
+                    config=config,
+                )
+            except ClientError as client_err:
+                # Quota / Rate limit exhausted -> Attempt fallback model
+                if client_err.code == 429 or "RESOURCE_EXHAUSTED" in str(client_err):
+                    logger.warning(
+                        f"Primary model '{self.primary_model}' exhausted quota. Falling back to '{self.fallback_model}'."
+                    )
+                    active_model = self.fallback_model
+                    response = await self.circuit_breaker.call(
+                        self._execute_generate_content,
+                        model_name=active_model,
+                        contents=formatted_contents,
+                        config=config,
+                    )
+                else:
+                    raise client_err
 
             executed_tool_calls: List[Dict[str, Any]] = []
 
-            # Check if Gemini returned function calls to execute
+            # Process function calls if returned by Gemini
             if response.function_calls:
                 for function_call in response.function_calls:
                     fn_name = function_call.name
                     fn_args = dict(function_call.args) if function_call.args else {}
 
-                    # Execute local Python tool function
                     result = execute_registered_tool(fn_name, fn_args)
                     executed_tool_calls.append(
                         {
@@ -110,13 +162,11 @@ class AIService:
                         }
                     )
 
-                    # Build function response part for Gemini
                     function_response_part = types.Part.from_function_response(
                         name=fn_name,
                         response={"result": result},
                     )
 
-                    # Append model turn and function response turn to contents
                     model_turn = types.Content(
                         role="model",
                         parts=[types.Part.from_function_call(name=fn_name, args=fn_args)],
@@ -128,9 +178,9 @@ class AIService:
 
                     formatted_contents.extend([model_turn, tool_turn])
 
-                # Send multi-turn request back to Gemini for final response
-                final_response = await self.client.aio.models.generate_content(
-                    model=self.model_name,
+                final_response = await self.circuit_breaker.call(
+                    self._execute_generate_content,
+                    model_name=active_model,
                     contents=formatted_contents,
                     config=config,
                 )
@@ -148,6 +198,9 @@ class AIService:
                 }
             return answer_text
 
+        except CircuitBreakerOpenException as exc:
+            logger.error(f"Circuit Breaker blocked call: {exc}")
+            raise AIServiceException("AI Service is temporarily unavailable due to upstream outages. Please retry shortly.")
         except ClientError as exc:
             logger.error(f"Gemini client error (4xx): {exc}")
             if exc.code == 401 or "API_KEY_INVALID" in str(exc):
@@ -158,7 +211,7 @@ class AIService:
                 f"AI client error: {exc.message if hasattr(exc, 'message') else str(exc)}"
             )
         except ServerError as exc:
-            logger.error(f"Gemini server error: {exc}")
+            logger.error(f"Gemini server error (5xx): {exc}")
             raise AIServiceException("AI service is temporarily unavailable. Please try again.")
         except APIError as exc:
             logger.error(f"Gemini API error: {exc}")
@@ -176,7 +229,10 @@ class AIService:
         temperature: Optional[float] = None,
         max_tokens: Optional[int] = None,
     ) -> AsyncGenerator[str, None]:
-        """Stream chat responses chunk by chunk from Gemini."""
+        """Stream chat responses chunk by chunk protected by the circuit breaker."""
+        if self.circuit_breaker.state == CircuitBreaker.state.fget(self.circuit_breaker) == "OPEN":
+            raise AIServiceException("AI Service is temporarily unavailable. Please retry shortly.")
+
         try:
             formatted_contents = self._translate_messages(messages)
             config = self._build_config(
@@ -185,16 +241,23 @@ class AIService:
                 max_output_tokens=max_tokens,
             )
             response_stream = await self.client.aio.models.generate_content_stream(
-                model=self.model_name,
+                model=self.primary_model,
                 contents=formatted_contents,
                 config=config,
             )
             async for chunk in response_stream:
                 if chunk.text:
                     yield chunk.text
-        except (ClientError, ServerError, APIError) as exc:
-            logger.error(f"Error during Gemini response streaming: {exc}")
-            raise AIServiceException(f"Streaming error: {str(exc)}")
+            self.circuit_breaker.record_success()
         except Exception as exc:
-            logger.error(f"Unexpected error in chat_stream: {exc}", exc_info=True)
+            self.circuit_breaker.record_failure(exc)
+            logger.error(f"Streaming error in AIService: {exc}", exc_info=True)
             raise AIServiceException(f"Streaming error: {str(exc)}")
+
+    def get_resilience_status(self) -> Dict[str, Any]:
+        """Returns resilience health metrics and active circuit breaker state."""
+        return {
+            "primary_model": self.primary_model,
+            "fallback_model": self.fallback_model,
+            "circuit_breaker": self.circuit_breaker.get_status(),
+        }

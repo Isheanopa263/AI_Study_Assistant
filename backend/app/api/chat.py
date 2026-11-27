@@ -1,5 +1,5 @@
 """
-API Router for Chat Sessions, Messaging, SSE Streaming, Summarization, Grounded RAG, Tool Calling, and Coaching.
+API Router for Chat Sessions, Messaging, SSE Streaming, Grounded RAG, Tools, Coaching, and Resilience.
 """
 import json
 import logging
@@ -54,6 +54,24 @@ def get_coaching_service(
     """Dependency provider for CoachingService."""
     return CoachingService(chat_repo=chat_repo)
 
+
+# ==========================================
+# Resilience & Health Monitoring Endpoint
+# ==========================================
+
+@router.get(
+    "/resilience/status",
+    status_code=status.HTTP_200_OK,
+    summary="Get AI Service Resilience & Circuit Breaker Health Status",
+)
+async def get_resilience_status() -> Dict[str, Any]:
+    """Returns circuit breaker metrics, failure thresholds, and configured fallback models."""
+    return ai_service.get_resilience_status()
+
+
+# ==========================================
+# Chat Session Management Endpoints
+# ==========================================
 
 @router.post(
     "/sessions",
